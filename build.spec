@@ -19,23 +19,19 @@ hiddenimports += collect_submodules("CSF")
 binaries = collect_dynamic_libs("CSF")
 
 excludes = [
-    # ── Heavy DL/ML frameworks (not used) ─────────────────────────────
+    # ── Large DL frameworks (not used, saves ~5 GB) ───────────────────
     "torch", "torchvision", "torchaudio",
     "tensorflow", "keras", "jax", "jaxlib",
     "cupy", "cupy_backends", "cuda", "cudf", "cuml",
     "nvidia", "nvfuser",
-    # ── Heavy data/viz libs (not used) ────────────────────────────────
-    "matplotlib", "pandas", "IPython", "jupyter", "notebook",
-    "seaborn", "plotly", "bokeh", "altair",
-    "sympy", "statsmodels",
-    "pyarrow", "fastparquet",
-    "pyproj", "shapely", "fiona", "geopandas", "rasterio",
+    # ── Heavy viz/data packages (not used) ────────────────────────────
+    "matplotlib", "pandas",
+    "IPython", "jupyter", "notebook",
+    "seaborn", "plotly", "bokeh",
+    "pyarrow", "shapely", "geopandas", "rasterio",
     "PIL", "Pillow",
     # ── Alternative GUI bindings ──────────────────────────────────────
     "PyQt5", "PySide6", "PySide2", "tkinter", "wx",
-    # ── Dev / test tooling ────────────────────────────────────────────
-    "pytest", "unittest", "sphinx", "lib2to3",
-    "optuna", "hyperopt", "mlflow", "ray",
 ]
 
 a = Analysis(
