@@ -42,7 +42,7 @@ excludes = [
     "pytest", "unittest", "docutils", "sphinx", "lib2to3",
     "pydantic", "hypothesis", "nose",
     # ── Rarely-needed stdlib extras ───────────────────────────────────
-    "email", "http.cookiejar", "xmlrpc", "pydoc_data",
+    "http.cookiejar", "xmlrpc", "pydoc_data",
     "curses", "turtle", "turtledemo",
 ]
 
