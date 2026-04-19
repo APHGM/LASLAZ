@@ -19,31 +19,23 @@ hiddenimports += collect_submodules("CSF")
 binaries = collect_dynamic_libs("CSF")
 
 excludes = [
-    # ── THE BIG ONES (torch + CUDA ~5GB) ──────────────────────────────
+    # ── Heavy DL/ML frameworks (not used) ─────────────────────────────
     "torch", "torchvision", "torchaudio",
+    "tensorflow", "keras", "jax", "jaxlib",
     "cupy", "cupy_backends", "cuda", "cudf", "cuml",
     "nvidia", "nvfuser",
-    "tensorflow", "keras", "jax", "jaxlib",
-    # ── Heavy scientific libs not used ────────────────────────────────
-    "matplotlib", "pandas", "pandas_profiling",
-    "IPython", "jupyter", "jupyter_client", "notebook", "ipykernel",
+    # ── Heavy data/viz libs (not used) ────────────────────────────────
+    "matplotlib", "pandas", "IPython", "jupyter", "notebook",
     "seaborn", "plotly", "bokeh", "altair",
-    "sympy", "statsmodels", "patsy",
+    "sympy", "statsmodels",
     "pyarrow", "fastparquet",
     "pyproj", "shapely", "fiona", "geopandas", "rasterio",
-    "lxml", "bs4", "html5lib",
     "PIL", "Pillow",
-    # ── Alternative Qt / GUI bindings ─────────────────────────────────
+    # ── Alternative GUI bindings ──────────────────────────────────────
     "PyQt5", "PySide6", "PySide2", "tkinter", "wx",
-    # ── scikit-learn addons / hyperparam tuning ───────────────────────
-    "tune_sklearn", "ray", "skopt", "scikitplot",
-    "optuna", "hyperopt", "mlflow",
-    # ── Dev / doc / test tooling ──────────────────────────────────────
-    "pytest", "unittest", "docutils", "sphinx", "lib2to3",
-    "pydantic", "hypothesis", "nose",
-    # ── Rarely-needed stdlib extras ───────────────────────────────────
-    "http.cookiejar", "xmlrpc", "pydoc_data",
-    "curses", "turtle", "turtledemo",
+    # ── Dev / test tooling ────────────────────────────────────────────
+    "pytest", "unittest", "sphinx", "lib2to3",
+    "optuna", "hyperopt", "mlflow", "ray",
 ]
 
 a = Analysis(
