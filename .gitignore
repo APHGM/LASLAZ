@@ -1,0 +1,23 @@
+# Data / output directories (multi-GB)
+Tile/
+CSF_Out/
+OUt/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# PyInstaller build output
+build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
