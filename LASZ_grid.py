@@ -1,10 +1,10 @@
 import threading
+import sys
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import laspy
 import numpy as np
-from sklearn.neighbors import KDTree
 
 DEFAULT_CHUNK_SIZE = 1_000_000
 MAX_SLOPE_EDGE_POINTS = 1_000_000
@@ -36,6 +36,12 @@ def refine_grid_slope_edges(input_file, output_file, spacing=0.025, k=16,
                              normal_dev_thresh=15.0,   # degrees
                              grad_thresh=0.3,          # Z-change per unit XY
                              log_func=_log):
+    if getattr(sys, "frozen", False):
+        raise RuntimeError("Slope-edge mode is not included in the clean executable build.")
+
+    from importlib import import_module
+    KDTree = import_module("sklearn.neighbors").KDTree
+
     input_path = Path(input_file).resolve()
     output_path = Path(output_file).resolve()
 
@@ -258,12 +264,15 @@ class BatchGridApp:
             variable=self.mode,
             value="streaming",
         ).grid(row=0, column=0, sticky="w", padx=(0, 18))
-        ttk.Radiobutton(
+        self.slope_mode_button = ttk.Radiobutton(
             mode_frame,
             text="Slope-edge refinement for smaller files",
             variable=self.mode,
             value="slope",
-        ).grid(row=0, column=1, sticky="w")
+        )
+        self.slope_mode_button.grid(row=0, column=1, sticky="w")
+        if getattr(sys, "frozen", False):
+            self.slope_mode_button.configure(state="disabled")
 
         ttk.Label(main, text="Chunk size").grid(row=4, column=0, sticky="w", pady=(0, 8))
         ttk.Entry(main, textvariable=self.chunk_size, width=16).grid(row=4, column=1, sticky="w", padx=8, pady=(0, 8))
