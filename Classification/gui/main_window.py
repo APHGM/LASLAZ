@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from processing.tile_processor import ProcessParams, process_all_tiles
+from processing.tiler import tile_file
 
 
 class WorkerThread(QThread):
@@ -19,11 +20,20 @@ class WorkerThread(QThread):
     progress = pyqtSignal(int, int)
     finished = pyqtSignal(str)
 
-    def __init__(self, tile_dir, out_dir, params):
+    def __init__(self, mode, source, out_dir, params, tile_size=100.0):
+        """
+        mode    : "folder" or "file"
+        source  : tile folder path (folder mode) or LAZ file path (file mode)
+        out_dir : output folder for classified results
+        params  : ProcessParams
+        tile_size : metres (only used in file mode)
+        """
         super().__init__()
-        self.tile_dir = tile_dir
+        self.mode = mode
+        self.source = source
         self.out_dir = out_dir
         self.params = params
+        self.tile_size = tile_size
         self._cancel = False
 
     def cancel(self):
@@ -31,8 +41,28 @@ class WorkerThread(QThread):
 
     def run(self):
         try:
+            if self.mode == "file":
+                src = Path(self.source)
+                tile_dir = src.parent / f"Tile_{src.stem}"
+                self.log.emit(f"Single-file mode — tiling to: {tile_dir}")
+                tile_file(
+                    in_path=str(src),
+                    out_dir=str(tile_dir),
+                    tile_size=self.tile_size,
+                    log_fn=self.log.emit,
+                    progress_fn=self.progress.emit,
+                    cancelled_fn=lambda: self._cancel,
+                )
+                if self._cancel:
+                    self.finished.emit("")
+                    return
+                self.log.emit("Tiling complete — starting classification.\n")
+                tile_dir_str = str(tile_dir)
+            else:
+                tile_dir_str = self.source
+
             csv_path = process_all_tiles(
-                tile_dir=self.tile_dir,
+                tile_dir=tile_dir_str,
                 out_dir=self.out_dir,
                 params=self.params,
                 log_fn=self.log.emit,
@@ -75,32 +105,78 @@ class MainWindow(QMainWindow):
     # ── I/O ──────────────────────────────────────────────────────────────
     def _io_group(self):
         grp = QGroupBox("Input / Output")
-        g = QGridLayout(grp)
+        outer = QVBoxLayout(grp)
 
-        g.addWidget(QLabel("Tile folder:"), 0, 0)
+        # Mode selector
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Input mode:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Tile folder  (pre-tiled *.laz files)", "folder")
+        self.mode_combo.addItem("Single LAZ file  (auto-tile then process)", "file")
+        self.mode_combo.currentIndexChanged.connect(self._on_input_mode_change)
+        mode_row.addWidget(self.mode_combo)
+        mode_row.addStretch()
+        outer.addLayout(mode_row)
+
+        # Stacked input panels
+        self.input_stack = QStackedWidget()
+
+        # ── Folder mode panel ──
+        folder_widget = QWidget()
+        fg = QGridLayout(folder_widget)
+        fg.addWidget(QLabel("Tile folder:"), 0, 0)
         self.tile_edit = QLineEdit()
         self.tile_edit.setPlaceholderText("Folder containing *.laz tiles")
-        g.addWidget(self.tile_edit, 0, 1)
+        fg.addWidget(self.tile_edit, 0, 1)
         btn_tile = QPushButton("Browse…")
         btn_tile.clicked.connect(self._browse_tiles)
-        g.addWidget(btn_tile, 0, 2)
+        fg.addWidget(btn_tile, 0, 2)
+        self.input_stack.addWidget(folder_widget)
 
-        g.addWidget(QLabel("Output folder:"), 1, 0)
+        # ── Single-file mode panel ──
+        file_widget = QWidget()
+        ff = QGridLayout(file_widget)
+        ff.addWidget(QLabel("LAZ file:"), 0, 0)
+        self.file_edit = QLineEdit()
+        self.file_edit.setPlaceholderText("Single .laz/.las file — will be tiled automatically")
+        ff.addWidget(self.file_edit, 0, 1)
+        btn_file = QPushButton("Browse…")
+        btn_file.clicked.connect(self._browse_file)
+        ff.addWidget(btn_file, 0, 2)
+
+        ff.addWidget(QLabel("Tile size (m):"), 1, 0)
+        self.tile_size_spin = QDoubleSpinBox()
+        self.tile_size_spin.setRange(10.0, 500.0)
+        self.tile_size_spin.setValue(100.0)
+        self.tile_size_spin.setSingleStep(5.0)
+        ff.addWidget(self.tile_size_spin, 1, 1)
+        ff.addWidget(QLabel("(tiles written next to source file)"), 1, 2)
+        self.input_stack.addWidget(file_widget)
+
+        outer.addWidget(self.input_stack)
+
+        # Common output controls
+        common = QGridLayout()
+        common.addWidget(QLabel("Output folder:"), 0, 0)
         self.out_edit = QLineEdit()
         self.out_edit.setPlaceholderText("Where to save classified LAS + CSV")
-        g.addWidget(self.out_edit, 1, 1)
+        common.addWidget(self.out_edit, 0, 1)
         btn_out = QPushButton("Browse…")
         btn_out.clicked.connect(self._browse_out)
-        g.addWidget(btn_out, 1, 2)
+        common.addWidget(btn_out, 0, 2)
 
-        g.addWidget(QLabel("Buffer (m):"), 2, 0)
+        common.addWidget(QLabel("Buffer (m):"), 1, 0)
         self.buf_spin = QDoubleSpinBox()
         self.buf_spin.setRange(1.0, 20.0)
         self.buf_spin.setValue(5.0)
         self.buf_spin.setSingleStep(1.0)
-        g.addWidget(self.buf_spin, 2, 1)
+        common.addWidget(self.buf_spin, 1, 1)
+        outer.addLayout(common)
 
         return grp
+
+    def _on_input_mode_change(self, idx):
+        self.input_stack.setCurrentIndex(idx)
 
     # ── Ground ───────────────────────────────────────────────────────────
     def _ground_group(self):
@@ -210,6 +286,14 @@ class MainWindow(QMainWindow):
         if d:
             self.tile_edit.setText(d)
 
+    def _browse_file(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Select LAZ file", "",
+            "LAS/LAZ files (*.laz *.las);;All files (*.*)"
+        )
+        if f:
+            self.file_edit.setText(f)
+
     def _browse_out(self):
         d = QFileDialog.getExistingDirectory(self, "Select output folder")
         if d:
@@ -244,22 +328,32 @@ class MainWindow(QMainWindow):
         )
 
     def _start(self):
-        tile_dir = self.tile_edit.text().strip()
+        mode = self.mode_combo.currentData()
         out_dir = self.out_edit.text().strip()
 
-        if not tile_dir or not Path(tile_dir).is_dir():
-            self._log("ERROR: Select a valid tile folder.")
-            return
         if not out_dir:
             self._log("ERROR: Select an output folder.")
             return
+
+        if mode == "folder":
+            source = self.tile_edit.text().strip()
+            if not source or not Path(source).is_dir():
+                self._log("ERROR: Select a valid tile folder.")
+                return
+            tile_size = 100.0
+        else:
+            source = self.file_edit.text().strip()
+            if not source or not Path(source).is_file():
+                self._log("ERROR: Select a valid LAZ file.")
+                return
+            tile_size = self.tile_size_spin.value()
 
         params = self._build_params()
         self.progress_bar.setValue(0)
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
-        self._worker = WorkerThread(tile_dir, out_dir, params)
+        self._worker = WorkerThread(mode, source, out_dir, params, tile_size)
         self._worker.log.connect(self._log)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
