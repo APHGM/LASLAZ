@@ -90,6 +90,7 @@ class MainWindow(QMainWindow):
         io_lay.addWidget(QLabel("Input folder:"), 0, 0)
         self.in_edit = QLineEdit()
         self.in_edit.setPlaceholderText("Folder containing .laz/.las files")
+        self.in_edit.textChanged.connect(self._on_input_changed)
         io_lay.addWidget(self.in_edit, 0, 1)
         btn_in = QPushButton("Browse…")
         btn_in.clicked.connect(self._browse_in)
@@ -97,11 +98,17 @@ class MainWindow(QMainWindow):
 
         io_lay.addWidget(QLabel("Output folder:"), 1, 0)
         self.out_edit = QLineEdit()
-        self.out_edit.setPlaceholderText("Folder to save classified files")
+        self.out_edit.setPlaceholderText("Same as input folder (default)")
         io_lay.addWidget(self.out_edit, 1, 1)
         self.btn_out = QPushButton("Browse…")
         self.btn_out.clicked.connect(self._browse_out)
         io_lay.addWidget(self.btn_out, 1, 2)
+        
+        # Checkbox to enable/disable custom output folder
+        self.custom_output_check = QCheckBox("Use custom output folder")
+        self.custom_output_check.setChecked(False)
+        self.custom_output_check.toggled.connect(self._toggle_custom_output)
+        io_lay.addWidget(self.custom_output_check, 2, 0, 1, 3)
         
         layout.addWidget(io_grp)
 
@@ -143,25 +150,19 @@ class MainWindow(QMainWindow):
         export_grp = QGroupBox("Export Options")
         export_lay = QGridLayout(export_grp)
         
-        # Same location checkbox
-        self.same_loc_check = QCheckBox("Export to same location as input")
-        self.same_loc_check.setChecked(True)
-        self.same_loc_check.toggled.connect(self._toggle_output_folder)
-        export_lay.addWidget(self.same_loc_check, 0, 0, 1, 2)
-        
         # Format selection
-        export_lay.addWidget(QLabel("Output Format:"), 1, 0)
+        export_lay.addWidget(QLabel("Output Format:"), 0, 0)
         self.format_combo = QComboBox()
         self.format_combo.addItems(["LAZ (Compressed)", "LAS (Uncompressed)"])
         self.format_combo.setCurrentIndex(0)  # LAZ by default
-        export_lay.addWidget(self.format_combo, 1, 1)
+        export_lay.addWidget(self.format_combo, 0, 1)
         
         # LAS version selection
-        export_lay.addWidget(QLabel("LAS Version:"), 2, 0)
+        export_lay.addWidget(QLabel("LAS Version:"), 1, 0)
         self.version_combo = QComboBox()
         self.version_combo.addItems(["LAS 1.4", "LAS 1.2"])
         self.version_combo.setCurrentIndex(0)  # 1.4 by default
-        export_lay.addWidget(self.version_combo, 2, 1)
+        export_lay.addWidget(self.version_combo, 1, 1)
         
         layout.addWidget(export_grp)
 
@@ -190,20 +191,28 @@ class MainWindow(QMainWindow):
         
         layout.addLayout(btn_row)
         
-        # Initialize output folder state (disabled since same_location is checked by default)
-        self._toggle_output_folder(True)
+        # Initialize output folder state (disabled by default, synced with input folder)
+        self._toggle_custom_output(False)
 
     def _toggle_manual(self, checked):
-        # Disable manual boxes if Auto-Adaptive is ON
+        """Disable manual boxes if Auto-Adaptive is ON"""
         disabled = checked
         self.cell_spin.setDisabled(disabled)
         self.thr_spin.setDisabled(disabled)
         self.sensitivity_spin.setDisabled(disabled)
 
-    def _toggle_output_folder(self, checked):
-        # Disable output folder controls if same location is checked
-        self.out_edit.setDisabled(checked)
-        self.btn_out.setDisabled(checked)
+    def _on_input_changed(self, text):
+        """Auto-update output folder when input folder changes (if custom output not enabled)"""
+        if not self.custom_output_check.isChecked():
+            self.out_edit.setText(text)
+
+    def _toggle_custom_output(self, checked):
+        """Enable/disable custom output folder selection"""
+        self.out_edit.setDisabled(not checked)
+        self.btn_out.setDisabled(not checked)
+        # If disabling custom output, sync with input folder
+        if not checked:
+            self.out_edit.setText(self.in_edit.text())
 
     def _browse_in(self):
         d = QFileDialog.getExistingDirectory(self, "Select input folder")
@@ -215,15 +224,15 @@ class MainWindow(QMainWindow):
 
     def _start(self):
         in_dir = self.in_edit.text().strip()
-        same_location = self.same_loc_check.isChecked()
-        out_dir = in_dir if same_location else self.out_edit.text().strip()
+        custom_output = self.custom_output_check.isChecked()
+        out_dir = self.out_edit.text().strip() if custom_output else in_dir
         
         if not in_dir:
             self.log_box.append("ERROR: Select input folder.")
             return
         
-        if not same_location and not out_dir:
-            self.log_box.append("ERROR: Select output folder or check 'Export to same location as input'.")
+        if custom_output and not out_dir:
+            self.log_box.append("ERROR: Select output folder or uncheck 'Use custom output folder'.")
             return
         
         # Get output format (strip "(Compressed)" or "(Uncompressed)" from display text)
@@ -240,7 +249,7 @@ class MainWindow(QMainWindow):
             ground_threshold=self.thr_spin.value(),
             object_sensitivity=self.sensitivity_spin.value(),
             output_format=output_format,
-            same_location=same_location,
+            same_location=not custom_output,
             las_version=las_version
         )
 
