@@ -171,6 +171,21 @@ class MainWindow(QMainWindow):
         self.buf_spin.setValue(5.0)
         self.buf_spin.setSingleStep(1.0)
         common.addWidget(self.buf_spin, 1, 1)
+
+        common.addWidget(QLabel("Output format:"), 2, 0)
+        self.output_format_combo = QComboBox()
+        self.output_format_combo.addItem("LAZ  (compressed)", "laz")
+        self.output_format_combo.addItem("LAS  (uncompressed)", "las")
+        self.output_format_combo.setCurrentIndex(0)
+        common.addWidget(self.output_format_combo, 2, 1)
+
+        common.addWidget(QLabel("LAS version:"), 3, 0)
+        self.las_version_combo = QComboBox()
+        self.las_version_combo.addItem("1.4", "1.4")
+        self.las_version_combo.addItem("1.2", "1.2")
+        self.las_version_combo.setCurrentIndex(0)
+        common.addWidget(self.las_version_combo, 3, 1)
+
         outer.addLayout(common)
 
         return grp
@@ -306,6 +321,8 @@ class MainWindow(QMainWindow):
         method = self.method_combo.currentData()
         return ProcessParams(
             buffer_m=self.buf_spin.value(),
+            output_format=self.output_format_combo.currentData(),
+            las_version=self.las_version_combo.currentData(),
             ground_method=method,
             # CSF params
             csf_cloth_resolution=self._csf_res.value(),

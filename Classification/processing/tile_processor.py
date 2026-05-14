@@ -13,6 +13,10 @@ from .bird_detector import detect_bird_contacts, BirdCluster
 class ProcessParams:
     tile_size: float = 100.0
     buffer_m: float = 5.0
+    # Output format: "las" or "laz"
+    output_format: str = "laz"
+    # LAS version: "1.2" or "1.4"
+    las_version: str = "1.4"
     # Ground method: "grid" or "csf"
     ground_method: str = "csf"
     # Grid method params
@@ -42,6 +46,92 @@ def _build_tile_index(tile_dir: Path) -> dict[tuple[int, int], Path]:
         if coords:
             index[coords] = f
     return index
+
+
+def _write_tile_summary(
+    tile_results: list[dict],
+    out_dir: Path,
+    log_fn: Callable[[str], None],
+    tile_dir: Path
+):
+    """
+    Write processing summary report, delete input LAZ files for processed tiles,
+    and print a summary table.
+    """
+    processed = [t for t in tile_results if t["status"] == "PROCESSED"]
+    skipped = [t for t in tile_results if t["status"] == "SKIPPED"]
+    
+    log_fn("\n" + "="*80)
+    log_fn("PROCESSING SUMMARY")
+    log_fn("="*80)
+    
+    # Summary counts
+    log_fn(f"Total tiles: {len(tile_results)}")
+    log_fn(f"  ✓ PROCESSED: {len(processed)}")
+    log_fn(f"  ✗ SKIPPED:   {len(skipped)}")
+    
+    # Table of results
+    log_fn("\n" + "-"*120)
+    log_fn(f"{'Tile Name':<25} {'Status':<12} {'Ground Pts':<15} {'Bird Pts':<12} {'Clusters':<10} {'Notes':<50}")
+    log_fn("-"*120)
+    
+    for tile_info in tile_results:
+        notes = tile_info["reason"] if tile_info["reason"] else "OK"
+        log_fn(
+            f"{tile_info['tile']:<25} "
+            f"{tile_info['status']:<12} "
+            f"{tile_info['n_ground']:<15,} "
+            f"{tile_info['n_bird']:<12} "
+            f"{tile_info['n_clusters']:<10} "
+            f"{notes:<50}"
+        )
+    
+    log_fn("-"*120)
+    
+    # Delete input LAZ files for processed tiles
+    deleted_count = 0
+    for tile_info in processed:
+        tile_file = tile_dir / tile_info["tile"]
+        if tile_file.exists():
+            try:
+                tile_file.unlink()
+                deleted_count += 1
+            except Exception as e:
+                log_fn(f"  WARNING: Could not delete {tile_file.name}: {e}")
+    
+    log_fn(f"\nDeleted {deleted_count} input LAZ files for processed tiles.")
+    log_fn(f"Kept {len(skipped)} input LAZ files for skipped tiles (requires review).")
+    
+    # Write summary to file
+    summary_file = out_dir / "processing_summary.txt"
+    with open(summary_file, "w") as f:
+        f.write("PROCESSING SUMMARY\n")
+        f.write("="*120 + "\n")
+        f.write(f"Total tiles: {len(tile_results)}\n")
+        f.write(f"  ✓ PROCESSED: {len(processed)}\n")
+        f.write(f"  ✗ SKIPPED:   {len(skipped)}\n\n")
+        
+        f.write("-"*120 + "\n")
+        f.write(f"{'Tile Name':<25} {'Status':<12} {'Ground Pts':<15} {'Bird Pts':<12} {'Clusters':<10} {'Notes':<50}\n")
+        f.write("-"*120 + "\n")
+        
+        for tile_info in tile_results:
+            notes = tile_info["reason"] if tile_info["reason"] else "OK"
+            f.write(
+                f"{tile_info['tile']:<25} "
+                f"{tile_info['status']:<12} "
+                f"{tile_info['n_ground']:<15,} "
+                f"{tile_info['n_bird']:<12} "
+                f"{tile_info['n_clusters']:<10} "
+                f"{notes:<50}\n"
+            )
+        
+        f.write("-"*120 + "\n")
+        f.write(f"\nDeleted {deleted_count} input LAZ files for processed tiles.\n")
+        f.write(f"Kept {len(skipped)} input LAZ files for skipped tiles (requires review).\n")
+    
+    log_fn(f"Summary written to: {summary_file}")
+    log_fn("="*80)
 
 
 def _load_neighbours(
@@ -101,6 +191,9 @@ def process_all_tiles(
 
     all_clusters: list[dict] = []
     csv_path = out_dir / "bird_contacts.csv"
+    
+    # Track processing status: (tile_name, status, reason, n_ground, n_bird, n_clusters)
+    tile_results: list[dict] = []
 
     for i, ((east, north), tile_path) in enumerate(tiles):
         if cancelled_fn():
@@ -108,16 +201,31 @@ def process_all_tiles(
             break
 
         log_fn(f"[{i+1}/{total}] Processing {tile_path.name} ...")
+        
+        result = {
+            "tile": tile_path.name,
+            "status": "UNKNOWN",
+            "reason": "",
+            "n_ground": 0,
+            "n_bird": 0,
+            "n_clusters": 0
+        }
 
         try:
             xyz_core, las_src = read_laz(tile_path)
         except Exception as e:
             log_fn(f"  ERROR reading {tile_path.name}: {e}")
+            result["status"] = "SKIPPED"
+            result["reason"] = f"Read error: {e}"
+            tile_results.append(result)
             progress_fn(i + 1, total)
             continue
 
         if len(xyz_core) == 0:
             log_fn(f"  Skipping empty tile.")
+            result["status"] = "SKIPPED"
+            result["reason"] = "Empty tile"
+            tile_results.append(result)
             progress_fn(i + 1, total)
             continue
 
@@ -161,6 +269,9 @@ def process_all_tiles(
                 )
         except Exception as e:
             log_fn(f"  ERROR in ground classification: {e}")
+            result["status"] = "SKIPPED"
+            result["reason"] = f"Ground classification error: {e}"
+            tile_results.append(result)
             progress_fn(i + 1, total)
             continue
 
@@ -188,25 +299,57 @@ def process_all_tiles(
             )
         except Exception as e:
             log_fn(f"  ERROR in bird detection: {e}")
+            result["status"] = "SKIPPED"
+            result["reason"] = f"Bird detection error: {e}"
+            tile_results.append(result)
             progress_fn(i + 1, total)
             continue
 
-        # Write classified tile
-        out_path = out_dir / f"{tile_path.stem}_classified.las"
-        try:
-            write_classified_laz(las_src, xyz_core, classification, out_path)
-        except Exception as e:
-            log_fn(f"  ERROR writing output: {e}")
-
         n_ground = int(ground_mask.sum())
         n_bird = int((classification == 20).sum())
-        log_fn(f"  Ground={n_ground:,}  Bird-contact pts={n_bird}  Clusters={len(clusters)}")
+        n_clusters = len(clusters)
+        
+        # Check if bird detection was skipped due to high candidate fraction
+        if n_clusters == 0 and n_bird == 0:
+            # Could be either no birds found OR detection skipped
+            # We infer from log context but mark as processed (detection was run)
+            result["status"] = "SKIPPED"
+            result["reason"] = "High candidate fraction or no birds detected"
+        else:
+            result["status"] = "PROCESSED"
+            result["reason"] = ""
+        
+        result["n_ground"] = n_ground
+        result["n_bird"] = n_bird
+        result["n_clusters"] = n_clusters
+        
+        log_fn(f"  Ground={n_ground:,}  Bird-contact pts={n_bird}  Clusters={n_clusters}")
+
+        # Only write output if birds were detected or no warnings
+        if result["status"] == "PROCESSED" or (n_bird > 0):
+            # Write classified tile
+            out_path = out_dir / f"{tile_path.stem}_classified.las"
+            try:
+                write_classified_laz(
+                    las_src, xyz_core, classification, out_path,
+                    output_format=params.output_format,
+                    las_version=params.las_version
+                )
+                result["status"] = "PROCESSED"
+            except Exception as e:
+                log_fn(f"  ERROR writing output: {e}")
+                result["status"] = "SKIPPED"
+                result["reason"] = f"Write error: {e}"
+                tile_results.append(result)
+                progress_fn(i + 1, total)
+                continue
 
         for c in clusters:
             row = asdict(c)
             row["tile"] = tile_path.name
             all_clusters.append(row)
 
+        tile_results.append(result)
         progress_fn(i + 1, total)
 
     # Write CSV summary
@@ -219,5 +362,8 @@ def process_all_tiles(
         log_fn(f"CSV summary written: {csv_path}")
     else:
         log_fn("No bird contacts found across all tiles.")
-
+    
+    # Create processing summary report
+    _write_tile_summary(tile_results, out_dir, log_fn, tile_dir)
+    
     return csv_path

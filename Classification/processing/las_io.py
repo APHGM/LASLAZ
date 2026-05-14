@@ -28,12 +28,23 @@ def write_classified_laz(
     source_las,
     xyz: np.ndarray,
     classification: np.ndarray,
-    out_path: str | Path
+    out_path: str | Path,
+    output_format: str = "laz",
+    las_version: str = "1.4"
 ):
-    """Write output LAS with classification field."""
+    """Write output LAS/LAZ with classification field.
+    
+    Args:
+        source_las: Source laspy LasData object
+        xyz: Nx3 array of point coordinates
+        classification: Classification values for each point
+        out_path: Output file path (extension will be set based on output_format)
+        output_format: "laz" (compressed) or "las" (uncompressed)
+        las_version: "1.2" or "1.4"
+    """
     header = laspy.LasHeader(
         point_format=source_las.header.point_format,
-        version=source_las.header.version
+        version=las_version
     )
     header.offsets = source_las.header.offsets
     header.scales = source_las.header.scales
@@ -52,6 +63,13 @@ def write_classified_laz(
             setattr(out, dim, getattr(source_las, dim))
         except Exception:
             pass
+
+    # Set output filename based on format
+    out_path = Path(out_path)
+    if output_format.lower() == "laz":
+        out_path = out_path.with_suffix(".laz")
+    else:
+        out_path = out_path.with_suffix(".las")
 
     out.write(str(out_path))
 
