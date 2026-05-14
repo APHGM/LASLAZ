@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton,
     QDoubleSpinBox, QSpinBox, QTextEdit, QProgressBar,
-    QFileDialog, QGridLayout, QCheckBox
+    QFileDialog, QGridLayout, QCheckBox, QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -99,9 +99,9 @@ class MainWindow(QMainWindow):
         self.out_edit = QLineEdit()
         self.out_edit.setPlaceholderText("Folder to save classified files")
         io_lay.addWidget(self.out_edit, 1, 1)
-        btn_out = QPushButton("Browse…")
-        btn_out.clicked.connect(self._browse_out)
-        io_lay.addWidget(btn_out, 1, 2)
+        self.btn_out = QPushButton("Browse…")
+        self.btn_out.clicked.connect(self._browse_out)
+        io_lay.addWidget(self.btn_out, 1, 2)
         
         layout.addWidget(io_grp)
 
@@ -139,7 +139,33 @@ class MainWindow(QMainWindow):
         layout.addWidget(g_grp)
         self._toggle_manual(True)
 
-        # 3. Progress / Log
+        # 3. Export Options Group
+        export_grp = QGroupBox("Export Options")
+        export_lay = QGridLayout(export_grp)
+        
+        # Same location checkbox
+        self.same_loc_check = QCheckBox("Export to same location as input")
+        self.same_loc_check.setChecked(True)
+        self.same_loc_check.toggled.connect(self._toggle_output_folder)
+        export_lay.addWidget(self.same_loc_check, 0, 0, 1, 2)
+        
+        # Format selection
+        export_lay.addWidget(QLabel("Output Format:"), 1, 0)
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["LAZ (Compressed)", "LAS (Uncompressed)"])
+        self.format_combo.setCurrentIndex(0)  # LAZ by default
+        export_lay.addWidget(self.format_combo, 1, 1)
+        
+        # LAS version selection
+        export_lay.addWidget(QLabel("LAS Version:"), 2, 0)
+        self.version_combo = QComboBox()
+        self.version_combo.addItems(["LAS 1.4", "LAS 1.2"])
+        self.version_combo.setCurrentIndex(0)  # 1.4 by default
+        export_lay.addWidget(self.version_combo, 2, 1)
+        
+        layout.addWidget(export_grp)
+
+        # 4. Progress / Log
         self.progress_bar = QProgressBar()
         layout.addWidget(self.progress_bar)
 
@@ -150,7 +176,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Log (Auto-updates every 15s during long runs):"))
         layout.addWidget(self.log_box)
 
-        # 4. Buttons
+        # 5. Buttons
         btn_row = QHBoxLayout()
         self.run_btn = QPushButton("Start Auto-Classification")
         self.run_btn.setStyleSheet("font-weight: bold; padding: 10px; background-color: #ecf0f1;")
@@ -163,6 +189,9 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.cancel_btn)
         
         layout.addLayout(btn_row)
+        
+        # Initialize output folder state (disabled since same_location is checked by default)
+        self._toggle_output_folder(True)
 
     def _toggle_manual(self, checked):
         # Disable manual boxes if Auto-Adaptive is ON
@@ -170,6 +199,11 @@ class MainWindow(QMainWindow):
         self.cell_spin.setDisabled(disabled)
         self.thr_spin.setDisabled(disabled)
         self.sensitivity_spin.setDisabled(disabled)
+
+    def _toggle_output_folder(self, checked):
+        # Disable output folder controls if same location is checked
+        self.out_edit.setDisabled(checked)
+        self.btn_out.setDisabled(checked)
 
     def _browse_in(self):
         d = QFileDialog.getExistingDirectory(self, "Select input folder")
@@ -181,16 +215,33 @@ class MainWindow(QMainWindow):
 
     def _start(self):
         in_dir = self.in_edit.text().strip()
-        out_dir = self.out_edit.text().strip()
-        if not in_dir or not out_dir:
-            self.log_box.append("ERROR: Select both input and output folders.")
+        same_location = self.same_loc_check.isChecked()
+        out_dir = in_dir if same_location else self.out_edit.text().strip()
+        
+        if not in_dir:
+            self.log_box.append("ERROR: Select input folder.")
             return
+        
+        if not same_location and not out_dir:
+            self.log_box.append("ERROR: Select output folder or check 'Export to same location as input'.")
+            return
+        
+        # Get output format (strip "(Compressed)" or "(Uncompressed)" from display text)
+        format_text = self.format_combo.currentText()
+        output_format = "laz" if "LAZ" in format_text else "las"
+        
+        # Get LAS version (strip "LAS " from display text)
+        version_text = self.version_combo.currentText()
+        las_version = version_text.replace("LAS ", "")
 
         params = ProcessParams(
             auto_mode=self.auto_check.isChecked(),
             grid_cell_size=self.cell_spin.value(),
             ground_threshold=self.thr_spin.value(),
-            object_sensitivity=self.sensitivity_spin.value()
+            object_sensitivity=self.sensitivity_spin.value(),
+            output_format=output_format,
+            same_location=same_location,
+            las_version=las_version
         )
 
         self.run_btn.setEnabled(False)

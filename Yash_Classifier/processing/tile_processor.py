@@ -15,6 +15,9 @@ class ProcessParams:
     grid_cell_size: float = 0.25
     ground_threshold: float = 0.15
     object_sensitivity: float = 0.50
+    output_format: str = "laz"  # "las" or "laz"
+    same_location: bool = True  # Export to same folder as input
+    las_version: str = "1.4"  # "1.2" or "1.4"
 
 
 def auto_analyze(xyz: np.ndarray, log_fn: Callable[[str], None]) -> tuple[float, float, float]:
@@ -46,7 +49,12 @@ def process_all_files(
 ) -> None:
     input_dir = Path(input_dir)
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Determine output directory
+    if params.same_location:
+        out_dir = input_dir
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     files = sorted(list(input_dir.glob("*.la[sz]")))
     total_files = len(files)
@@ -123,9 +131,10 @@ def process_all_files(
                         classification_full[core_global_indices[ground_mask_chunk[mask_core_local]]] = 2
 
                 # Save Final
-                log_fn("  Saving classified LAS...")
-                out_path = out_dir / f"{file_path.stem}_ground.las"
-                write_classified_laz(las_full, xyz_full, classification_full, out_path)
+                output_ext = "laz" if params.output_format.lower() == "laz" else "las"
+                log_fn(f"  Saving classified {output_ext.upper()} (LAS {params.las_version})...")
+                out_path = out_dir / f"{file_path.stem}_ground.{output_ext}"
+                write_classified_laz(las_full, xyz_full, classification_full, out_path, params.output_format, params.las_version)
                 log_fn(f"  SUCCESS! Total Ground Points: {int((classification_full==2).sum()):,}")
 
         except Exception as e:

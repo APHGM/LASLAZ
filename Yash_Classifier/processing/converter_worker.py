@@ -51,7 +51,7 @@ class ConverterWorker(QThread):
         self.log.emit(f"Opening E57 file {input_path.name}...")
         e57 = pye57.E57(str(input_path))
         
-        header = laspy.LasHeader(point_format=2, version="1.2")
+        header = laspy.LasHeader(point_format=8, version="1.4")
         # Initialize generic offsets, we will fix them per scan if possible, 
         # but laspy writer doesn't allow changing offsets mid-write. 
         # For typical coordinates, 0.0 offset is fine, but to be robust, 
