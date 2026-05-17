@@ -24,12 +24,12 @@ class ProcessParams:
     ground_threshold: float = 0.50
     smooth_passes: int = 5
     # CSF method params
-    csf_cloth_resolution: float = 0.5
-    csf_class_threshold: float = 0.10
-    csf_rigidness: int = 2
-    csf_iterations: int = 500
+    csf_cloth_resolution: float = 0.30
+    csf_class_threshold: float = 0.05
+    csf_rigidness: int = 1
+    csf_iterations: int = 800
     csf_slope_smooth: bool = True
-    csf_voxel_size: float = 0.15
+    csf_voxel_size: float = 0.10
     # Bird detection
     nz_min: float = 0.02
     nz_max: float = 0.40
