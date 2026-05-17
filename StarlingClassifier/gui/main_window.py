@@ -81,6 +81,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Starling Ground-Contact Classifier")
         self.setMinimumWidth(760)
         self._worker: WorkerThread | None = None
+        
+        # Declare UI attributes for type checking
+        self._csf_res: QDoubleSpinBox | None = None
+        self._csf_thr: QDoubleSpinBox | None = None
+        self._csf_rig: QSpinBox | None = None
+        self._csf_iter: QSpinBox | None = None
+        self._csf_vox: QDoubleSpinBox | None = None
+        self._ground_cell: QDoubleSpinBox | None = None
+        self._ground_thr: QDoubleSpinBox | None = None
+        self._smooth_pass: QSpinBox | None = None
+        self._nz_min: QDoubleSpinBox | None = None
+        self._nz_max: QDoubleSpinBox | None = None
+        self._dbscan_eps: QDoubleSpinBox | None = None
+        self._dbscan_min: QSpinBox | None = None
+        self._min_foot: QDoubleSpinBox | None = None
+        self._max_foot: QDoubleSpinBox | None = None
+        
         self._build_ui()
 
     def _build_ui(self):
