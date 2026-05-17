@@ -1,3 +1,4 @@
+# pyright: reportOptionalMemberAccess=false
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton,
@@ -81,24 +82,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Starling Ground-Contact Classifier")
         self.setMinimumWidth(760)
         self._worker: WorkerThread | None = None
-        
-        # Declare UI attributes for type checking
-        self._csf_res: QDoubleSpinBox | None = None
-        self._csf_thr: QDoubleSpinBox | None = None
-        self._csf_rig: QSpinBox | None = None
-        self._csf_iter: QSpinBox | None = None
-        self._csf_vox: QDoubleSpinBox | None = None
-        self._ground_cell: QDoubleSpinBox | None = None
-        self._ground_thr: QDoubleSpinBox | None = None
-        self._smooth_pass: QSpinBox | None = None
-        self._nz_min: QDoubleSpinBox | None = None
-        self._nz_max: QDoubleSpinBox | None = None
-        self._dbscan_eps: QDoubleSpinBox | None = None
-        self._dbscan_min: QSpinBox | None = None
-        self._min_foot: QDoubleSpinBox | None = None
-        self._max_foot: QDoubleSpinBox | None = None
-        
         self._build_ui()
+
 
     def _build_ui(self):
         root = QWidget()
@@ -235,7 +220,7 @@ class MainWindow(QMainWindow):
         self._add_dspin(cg, 0, "Cloth resolution (m):", 0.10, 5.0, 0.30, 0.10, "csf_res")
         self._add_dspin(cg, 1, "Class threshold (m):", 0.01, 1.0, 0.05, 0.01, "csf_thr")
         self._add_spin(cg, 2, "Rigidness  (1=steep · 2=general · 3=flat):", 1, 3, 1, "csf_rig")
-        self._add_spin(cg, 3, "Iterations:", 100, 2000, 800, "csf_iter")
+        self._add_spin(cg, 3, "Iterations:", 100, 2000, 500, "csf_iter")
         self._add_dspin(cg, 4, "Pre-thin voxel size (m):", 0.05, 1.0, 0.10, 0.05, "csf_vox")
         cg.addWidget(QLabel("Slope smooth:"), 5, 0)
         self.csf_slope = QCheckBox()

@@ -37,7 +37,7 @@ Python venv: `D:\VSCode_Working\Python\arunpy\` (Python 3.12)
 ## Folder layout
 
 ```
-D:\VSCode_Working\Python\Classification\Classification\
+D:\VSCode_Working\Python\Classification\StarlingClassifier\
 ├── main.py                  ← GUI entry point
 ├── tile_single_laz.py       ← CLI tiler (streams LAZ → tiles)
 ├── start_gui.bat            ← double-click to launch GUI
@@ -46,6 +46,11 @@ D:\VSCode_Working\Python\Classification\Classification\
 ├── requirements.txt
 ├── README.md
 ├── CONTEXT.md               ← this file
+├── Sterling.ico             ← app icon
+├── setting.txt              ← saved/tuned parameter values
+├── Classfication_settings.docx  ← settings reference doc
+├── output\                  ← classified LAS + bird_contacts.csv
+├── dist\                    ← PyInstaller build output
 ├── gui\
 │   └── main_window.py       ← PyQt6 window + WorkerThread
 └── processing\
