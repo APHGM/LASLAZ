@@ -104,7 +104,7 @@ def _write_tile_summary(
     
     # Write summary to file
     summary_file = out_dir / "processing_summary.txt"
-    with open(summary_file, "w") as f:
+    with open(summary_file, "w", encoding="utf-8") as f:
         f.write("PROCESSING SUMMARY\n")
         f.write("="*120 + "\n")
         f.write(f"Total tiles: {len(tile_results)}\n")
@@ -359,7 +359,7 @@ def process_all_tiles(
     # Write CSV summary
     if all_clusters:
         fieldnames = list(all_clusters[0].keys())
-        with open(csv_path, "w", newline="") as fh:
+        with open(csv_path, "w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(all_clusters)

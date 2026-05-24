@@ -3,7 +3,12 @@
 PyInstaller spec — Starling Classifier.
 Run:  pyinstaller --noconfirm --clean build.spec
 """
+import os
 from PyInstaller.utils.hooks import collect_submodules, collect_dynamic_libs
+
+# Force UTF-8 in the bundled exe so unicode chars (✓, °, ²) don't crash
+os.environ["PYTHONIOENCODING"] = "utf-8"
+os.environ["PYTHONUTF8"] = "1"
 
 block_cipher = None
 
@@ -20,20 +25,24 @@ hiddenimports += collect_submodules("CSF")
 
 binaries = collect_dynamic_libs("CSF")
 
-# Only exclude large frameworks that are definitely not used
+# Large frameworks we definitely don't use.
+# NOTE: do NOT add `pandas` here — the cloth-simulation-filter (CSF) package
+# imports pandas internally during init. Excluding pandas breaks CSF.
 excludes = [
-    # DL frameworks
+    # Deep learning
     "torch", "torchvision", "torchaudio",
     "tensorflow", "keras", "jax", "jaxlib",
     "cupy", "nvidia",
-    # Viz / notebooks
-    "matplotlib", "pandas", "IPython", "jupyter", "notebook",
+    # Visualisation / notebooks
+    "matplotlib", "IPython", "jupyter", "notebook",
     "seaborn", "plotly", "bokeh",
     "PIL", "Pillow",
-    # GUI toolkits we don't use
+    # Other GUI toolkits
     "PyQt5", "PySide6", "PySide2", "tkinter", "wx",
-    # Geo
+    # Heavy geospatial libs we don't call
     "shapely", "geopandas", "rasterio", "fiona", "pyarrow",
+    # Sklearn add-ons (often pull in torch/ray)
+    "tune_sklearn", "ray", "skopt", "scikitplot",
 ]
 
 a = Analysis(
@@ -62,7 +71,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    icon='D:\VSCode_Working\Python\Classification\StarlingClassifier\Sterling.ico',
+    icon=r"D:\VSCode_Working\Python\Classification\StarlingClassifier\Sterling.ico",
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
