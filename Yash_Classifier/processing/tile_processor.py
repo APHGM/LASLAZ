@@ -56,7 +56,7 @@ def process_all_files(
     else:
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    files = sorted(list(input_dir.glob("*.la[sz]")))
+    files = sorted(list(input_dir.glob("**/*.la[sz]")))
     total_files = len(files)
 
     for i, file_path in enumerate(files):

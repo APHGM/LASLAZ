@@ -27,7 +27,7 @@ class ProcessParams:
     csf_cloth_resolution: float = 0.30
     csf_class_threshold: float = 0.05
     csf_rigidness: int = 1
-    csf_iterations: int = 800
+    csf_iterations: int = 1000
     csf_slope_smooth: bool = True
     csf_voxel_size: float = 0.10
     # Bird detection
@@ -325,24 +325,28 @@ def process_all_tiles(
         
         log_fn(f"  Ground={n_ground:,}  Bird-contact pts={n_bird}  Clusters={n_clusters}")
 
-        # Only write output if birds were detected or no warnings
-        if result["status"] == "PROCESSED" or (n_bird > 0):
-            # Write classified tile
-            out_path = out_dir / f"{tile_path.stem}_classified.las"
-            try:
-                write_classified_laz(
-                    las_src, xyz_core, classification, out_path,
-                    output_format=params.output_format,
-                    las_version=params.las_version
-                )
+        # Always write — ground classification alone is valuable output, 
+        # and we want to capture zero-bird cases in the CSV summary. 
+        # The classification array will have 20 for bird contacts, 2 for ground, and 1 for unclassified points.
+        # Write classified tile
+        out_path = out_dir / f"{tile_path.stem}_classified.las"
+        try:
+            written = write_classified_laz(
+                las_src, xyz_core, classification, out_path,
+                output_format=params.output_format,
+                las_version=params.las_version
+            )
+            log_fn(f"  WROTE: {written}  (ground={int(ground_mask.sum()):,}, birds={n_bird})")
+            # Keep existing status so SKIPPED tiles still report the reason in CSV
+            if result.get("status") != "SKIPPED":
                 result["status"] = "PROCESSED"
-            except Exception as e:
-                log_fn(f"  ERROR writing output: {e}")
-                result["status"] = "SKIPPED"
-                result["reason"] = f"Write error: {e}"
-                tile_results.append(result)
-                progress_fn(i + 1, total)
-                continue
+        except Exception as e:
+            log_fn(f"  ERROR writing output: {e}")
+            result["status"] = "WRITE_FAILED"
+            result["reason"] = f"Write error: {e}"
+            tile_results.append(result)
+            progress_fn(i + 1, total)
+            continue
 
         for c in clusters:
             row = asdict(c)

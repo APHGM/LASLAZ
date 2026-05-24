@@ -30,21 +30,26 @@ def write_classified_laz(
     classification: np.ndarray,
     out_path: str | Path,
     output_format: str = "laz",
-    las_version: str = "1.4"
-):
+    las_version: str = "1.4",
+) -> Path:
     """Write output LAS/LAZ with classification field.
-    
-    Args:
-        source_las: Source laspy LasData object
-        xyz: Nx3 array of point coordinates
-        classification: Classification values for each point
-        out_path: Output file path (extension will be set based on output_format)
-        output_format: "laz" (compressed) or "las" (uncompressed)
-        las_version: "1.2" or "1.4"
+
+    Returns the actual written file path so the caller can log it.
+    Tolerates GUI display labels like 'LAZ (compressed)' or 'LAS (uncompressed)'.
+    Raises a clear error if LAZ write fails because the lazrs backend is missing.
     """
+    # Tolerate display labels from the GUI like "LAZ (compressed)"
+    fmt_norm = (output_format or "laz").strip().lower()
+    fmt = "laz" if "laz" in fmt_norm else "las"
+
+    # Normalise version to "1.x"
+    ver_norm = (las_version or "1.4").strip()
+    if not ver_norm.startswith("1."):
+        ver_norm = "1.4"
+
     header = laspy.LasHeader(
         point_format=source_las.header.point_format,
-        version=las_version
+        version=ver_norm,
     )
     header.offsets = source_las.header.offsets
     header.scales = source_las.header.scales
@@ -55,7 +60,6 @@ def write_classified_laz(
     out.z = xyz[:, 2]
     out.classification = classification.astype(np.uint8)
 
-    # Copy other standard fields if present
     for dim in source_las.point_format.dimension_names:
         if dim in ("X", "Y", "Z", "classification"):
             continue
@@ -64,14 +68,21 @@ def write_classified_laz(
         except Exception:
             pass
 
-    # Set output filename based on format
-    out_path = Path(out_path)
-    if output_format.lower() == "laz":
-        out_path = out_path.with_suffix(".laz")
-    else:
-        out_path = out_path.with_suffix(".las")
+    out_path = Path(out_path).with_suffix(f".{fmt}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    out.write(str(out_path))
+    try:
+        out.write(str(out_path))
+    except Exception as e:
+        if fmt == "laz":
+            raise RuntimeError(
+                f"LAZ write failed for {out_path.name}. "
+                f"Install backend:  pip install lazrs   "
+                f"OR switch Output Format to LAS. Original error: {e}"
+            ) from e
+        raise
+
+    return out_path
 
 
 def parse_tile_coords(filename: str) -> tuple[int, int] | None:
