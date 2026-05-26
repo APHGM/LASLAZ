@@ -174,6 +174,20 @@ class MainWindow(QMainWindow):
         self.buf_spin.setSingleStep(1.0)
         common.addWidget(self.buf_spin, 1, 1)
 
+        # Parallel workers
+        import os
+        common.addWidget(QLabel("Parallel workers:"), 1, 2)
+        self.workers_spin = QSpinBox()
+        cpu = os.cpu_count() or 4
+        self.workers_spin.setRange(1, max(1, cpu))
+        # Default: half the logical cores, capped at 6 (RAM headroom)
+        self.workers_spin.setValue(min(max(1, cpu // 2), 6))
+        self.workers_spin.setToolTip(
+            "1 = sequential.  N = run N tiles in parallel processes.\n"
+            "Tiles ≥150M points always run solo to protect RAM."
+        )
+        common.addWidget(self.workers_spin, 1, 3)
+
         common.addWidget(QLabel("Output format:"), 2, 0)
         self.output_format_combo = QComboBox()
         self.output_format_combo.addItem("LAZ  (compressed)", "laz")
@@ -326,6 +340,7 @@ class MainWindow(QMainWindow):
             output_format=self.output_format_combo.currentData(),
             las_version=self.las_version_combo.currentData(),
             ground_method=method,
+            num_workers=self.workers_spin.value(),
             # CSF params
             csf_cloth_resolution=self._csf_res.value(),
             csf_class_threshold=self._csf_thr.value(),

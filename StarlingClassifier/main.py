@@ -1,4 +1,5 @@
 import sys
+import multiprocessing
 
 # Force UTF-8 on stdout/stderr so unicode characters (✓, °, ², etc.)
 # don't crash on Windows' default cp1252 console codec.
@@ -21,4 +22,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # REQUIRED for ProcessPoolExecutor when bundled with PyInstaller on Windows.
+    # Without this, worker subprocesses would re-launch the GUI recursively.
+    multiprocessing.freeze_support()
     main()
