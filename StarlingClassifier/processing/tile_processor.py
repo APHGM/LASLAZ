@@ -312,6 +312,87 @@ def _write_tile_summary(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Single-file path — skip tiling entirely
+# ────────────────────────────────────────────────────────────────────────────
+
+def process_single_file(
+    file_path: str | Path,
+    out_dir: str | Path,
+    params: ProcessParams,
+    log_fn: Callable[[str], None] = print,
+    progress_fn: Callable[[int, int], None] = lambda i, n: None,
+    cancelled_fn: Callable[[], bool] = lambda: False,
+) -> Path:
+    """
+    Process ONE LAZ/LAS file as a single unit — no tiling, no buffer loading.
+    Use when:
+      * File is small (< ~300 M points, fits in RAM)
+      * File is a single scan with no grid neighbours
+      * You don't want the tiling overhead
+
+    Returns path to the CSV summary (may be empty if no birds found).
+    """
+    file_path = Path(file_path)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not file_path.exists():
+        raise FileNotFoundError(file_path)
+
+    log_fn(f"Single-file mode (no tiling): {file_path.name}")
+    try:
+        import laspy
+        with laspy.open(str(file_path)) as r:
+            log_fn(f"  Point count: {r.header.point_count:,}")
+    except Exception:
+        pass
+
+    job = {
+        "tile_path": str(file_path),
+        "neighbour_paths": [],          # no neighbours
+        "params": params,
+        "out_dir": str(out_dir),
+    }
+
+    if cancelled_fn():
+        log_fn("Cancelled before start.")
+        return out_dir / "bird_contacts.csv"
+
+    result = _process_one_tile(job)
+
+    # Stream the buffered logs
+    for line in result["log_lines"]:
+        log_fn(line)
+
+    progress_fn(1, 1)
+
+    # ── Write CSV summary ────────────────────────────────────────────────
+    csv_path = out_dir / "bird_contacts.csv"
+    if result["clusters"]:
+        fieldnames = list(result["clusters"][0].keys())
+        with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(result["clusters"])
+        log_fn(f"CSV summary written: {csv_path}")
+    else:
+        log_fn("No bird contacts found.")
+
+    # ── Mini summary (no tile-deletion step in single-file mode) ─────────
+    log_fn("\n" + "=" * 60)
+    log_fn(f"Status:    {result['status']}")
+    log_fn(f"Ground:    {result['n_ground']:,}")
+    log_fn(f"Birds:     {result['n_bird']:,}  ({result['n_clusters']} clusters)")
+    if result["reason"]:
+        log_fn(f"Note:      {result['reason']}")
+    if result["written_path"]:
+        log_fn(f"Output:    {result['written_path']}")
+    log_fn("=" * 60)
+
+    return csv_path
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Public entry point — dispatches sequential or parallel
 # ────────────────────────────────────────────────────────────────────────────
 

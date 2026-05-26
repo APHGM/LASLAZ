@@ -12,7 +12,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from processing.tile_processor import ProcessParams, process_all_tiles
+from processing.tile_processor import (
+    ProcessParams, process_all_tiles, process_single_file
+)
 from processing.tiler import tile_file
 
 
@@ -21,13 +23,15 @@ class WorkerThread(QThread):
     progress = pyqtSignal(int, int)
     finished = pyqtSignal(str)
 
-    def __init__(self, mode, source, out_dir, params, tile_size=100.0):
+    def __init__(self, mode, source, out_dir, params,
+                 tile_size=100.0, skip_tiling=False):
         """
-        mode    : "folder" or "file"
-        source  : tile folder path (folder mode) or LAZ file path (file mode)
-        out_dir : output folder for classified results
-        params  : ProcessParams
-        tile_size : metres (only used in file mode)
+        mode         : "folder" or "file"
+        source       : tile folder path (folder mode) or LAZ file path (file mode)
+        out_dir      : output folder for classified results
+        params       : ProcessParams
+        tile_size    : metres (only used in file mode when skip_tiling=False)
+        skip_tiling  : if True (file mode only), process whole file as one
         """
         super().__init__()
         self.mode = mode
@@ -35,6 +39,7 @@ class WorkerThread(QThread):
         self.out_dir = out_dir
         self.params = params
         self.tile_size = tile_size
+        self.skip_tiling = skip_tiling
         self._cancel = False
 
     def cancel(self):
@@ -42,6 +47,20 @@ class WorkerThread(QThread):
 
     def run(self):
         try:
+            # ── Single file + skip tiling: direct one-shot path ─────────
+            if self.mode == "file" and self.skip_tiling:
+                csv_path = process_single_file(
+                    file_path=self.source,
+                    out_dir=self.out_dir,
+                    params=self.params,
+                    log_fn=self.log.emit,
+                    progress_fn=self.progress.emit,
+                    cancelled_fn=lambda: self._cancel,
+                )
+                self.finished.emit(str(csv_path))
+                return
+
+            # ── Single file → tile first ────────────────────────────────
             if self.mode == "file":
                 src = Path(self.source)
                 tile_dir = src.parent / f"Tile_{src.stem}"
@@ -153,6 +172,18 @@ class MainWindow(QMainWindow):
         self.tile_size_spin.setSingleStep(5.0)
         ff.addWidget(self.tile_size_spin, 1, 1)
         ff.addWidget(QLabel("(tiles written next to source file)"), 1, 2)
+
+        # Skip-tiling checkbox
+        self.skip_tile_chk = QCheckBox(
+            "Skip tiling — process whole file as one  "
+            "(recommended for files < ~300 M points)"
+        )
+        self.skip_tile_chk.setChecked(False)
+        self.skip_tile_chk.toggled.connect(
+            lambda on: self.tile_size_spin.setEnabled(not on)
+        )
+        ff.addWidget(self.skip_tile_chk, 2, 0, 1, 3)
+
         self.input_stack.addWidget(file_widget)
 
         outer.addWidget(self.input_stack)
@@ -387,7 +418,11 @@ class MainWindow(QMainWindow):
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
-        self._worker = WorkerThread(mode, source, out_dir, params, tile_size)
+        skip_tiling = (mode == "file") and self.skip_tile_chk.isChecked()
+        self._worker = WorkerThread(
+            mode, source, out_dir, params,
+            tile_size=tile_size, skip_tiling=skip_tiling,
+        )
         self._worker.log.connect(self._log)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
