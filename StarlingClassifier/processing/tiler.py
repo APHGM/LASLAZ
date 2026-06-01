@@ -9,6 +9,43 @@ from collections import defaultdict
 from typing import Callable
 
 
+def _clone_header(src_header: laspy.LasHeader) -> laspy.LasHeader:
+    """
+    Build a new LasHeader that preserves point format (incl. RGB),
+    scales, offsets, extra dimensions, and VLRs from the source.
+    Required so drone LiDAR colour, GPS time, and scanner metadata
+    survive the tiling step.
+    """
+    new_header = laspy.LasHeader(
+        point_format=src_header.point_format.id,   # use ID, not the object
+        version=src_header.version,
+    )
+    new_header.scales = src_header.scales
+    new_header.offsets = src_header.offsets
+
+    # Copy extra dimensions (e.g. NIR for some scanners, custom attributes)
+    for ed in getattr(src_header.point_format, "extra_dimensions", []):
+        try:
+            new_header.add_extra_dim(ed)
+        except Exception:
+            pass
+
+    # Copy VLRs — RGB and other metadata often live here
+    try:
+        new_header.vlrs.extend(src_header.vlrs)
+    except Exception:
+        pass
+
+    # Copy EVLRs (LAS 1.4 only)
+    try:
+        if hasattr(src_header, "evlrs") and src_header.evlrs:
+            new_header.evlrs.extend(src_header.evlrs)
+    except Exception:
+        pass
+
+    return new_header
+
+
 def tile_file(
     in_path: str,
     out_dir: str,
@@ -59,12 +96,7 @@ def tile_file(
 
                     if tile_key not in writers:
                         out_path = out_dir / f"{east}_{north}.laz"
-                        new_header = laspy.LasHeader(
-                            point_format=header.point_format,
-                            version=header.version,
-                        )
-                        new_header.scales = header.scales
-                        new_header.offsets = header.offsets
+                        new_header = _clone_header(header)
                         writers[tile_key] = laspy.open(
                             str(out_path), mode="w", header=new_header
                         )

@@ -47,12 +47,27 @@ def write_classified_laz(
     if not ver_norm.startswith("1."):
         ver_norm = "1.4"
 
+    # Build header preserving point format ID, extra dims, and VLRs
+    # (so RGB / GPS time / scanner metadata survive)
     header = laspy.LasHeader(
-        point_format=source_las.header.point_format,
+        point_format=source_las.header.point_format.id,   # use ID, not object
         version=ver_norm,
     )
     header.offsets = source_las.header.offsets
     header.scales = source_las.header.scales
+
+    # Preserve extra dimensions defined on the source
+    for ed in getattr(source_las.header.point_format, "extra_dimensions", []):
+        try:
+            header.add_extra_dim(ed)
+        except Exception:
+            pass
+
+    # Preserve VLRs (RGB metadata, projection info, scanner custom blocks)
+    try:
+        header.vlrs.extend(source_las.header.vlrs)
+    except Exception:
+        pass
 
     out = laspy.LasData(header=header)
     out.x = xyz[:, 0]
@@ -60,6 +75,7 @@ def write_classified_laz(
     out.z = xyz[:, 2]
     out.classification = classification.astype(np.uint8)
 
+    # Copy every other dimension from source (RGB, intensity, GPS time, return num, etc.)
     for dim in source_las.point_format.dimension_names:
         if dim in ("X", "Y", "Z", "classification"):
             continue
