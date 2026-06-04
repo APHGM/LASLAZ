@@ -9,6 +9,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from .las_io import read_laz, read_laz_bbox, write_classified_laz, parse_tile_coords
 from .ground_classifier import classify_ground, classify_ground_csf
 from .bird_detector import detect_bird_contacts, BirdCluster
+from .height_classifier import (
+    classify_heights, classify_model_keypoints, ground_mask_from_classification,
+)
+from .ground_classifier import _compute_nz   # for nz from existing ground
 
 
 # Tiles larger than this run on their own (no parallel siblings) to protect RAM
@@ -23,7 +27,9 @@ class ProcessParams:
     output_format: str = "laz"
     # LAS version: "1.2" or "1.4"
     las_version: str = "1.4"
-    # Ground method: "grid" or "csf"
+    # Ground source: "compute" (run CSF/Grid) or "from_file" (use existing class 2)
+    ground_source: str = "compute"
+    # Ground method (only used when ground_source == "compute"): "grid" or "csf"
     ground_method: str = "csf"
     # Grid method params
     ground_cell_size: float = 0.5
@@ -43,6 +49,15 @@ class ProcessParams:
     dbscan_min_pts: int = 8
     max_footprint_m2: float = 1.0
     min_footprint_m2: float = 0.005
+    # Height-based classification (TerraScan-style)
+    classify_vegetation: bool = True
+    veg_low_min: float = 0.10            # nZ start of low veg
+    veg_low_max: float = 1.00            # boundary low/med
+    veg_med_max: float = 3.00            # boundary med/high
+    noise_below_ground: float = -0.10    # nZ below this = class 7 noise
+    # Model key points (thinned ground for TIN building)
+    classify_model_keys: bool = False
+    modelkey_step_m: float = 8.0
     # Parallelism: 1 = sequential, N = ProcessPoolExecutor with N workers
     num_workers: int = 1
 
@@ -51,13 +66,34 @@ class ProcessParams:
 # Tile indexing & neighbour helpers
 # ────────────────────────────────────────────────────────────────────────────
 
-def _build_tile_index(tile_dir: Path) -> dict[tuple[int, int], Path]:
-    index = {}
+def _build_tile_index(tile_dir: Path) -> tuple[dict[tuple[int, int], Path], dict]:
+    """
+    Index all *.laz / *.las files in tile_dir.
+
+    Files named `<easting>_<northing>.laz` get parsed grid coordinates
+    (enables neighbour buffer loading at edges).
+
+    Files with any other naming get synthetic negative keys — they're still
+    processed, but no neighbour buffer is loaded for them (no neighbours
+    can match a negative key).
+
+    Returns (index, stats_dict). stats has keys 'grid' and 'misc'.
+    """
+    index: dict[tuple[int, int], Path] = {}
+    synthetic_id = 0
+    grid_count = 0
+    misc_count = 0
     for f in sorted(tile_dir.glob("*.la[sz]")):
         coords = parse_tile_coords(f.name)
         if coords:
             index[coords] = f
-    return index
+            grid_count += 1
+        else:
+            index[(-1_000_000_000 - synthetic_id,
+                   -1_000_000_000 - synthetic_id)] = f
+            synthetic_id += 1
+            misc_count += 1
+    return index, {"grid": grid_count, "misc": misc_count}
 
 
 def _neighbour_paths(
@@ -152,32 +188,59 @@ def _process_one_tile(job: dict) -> dict:
 
     # ── Ground classification ─────────────────────────────────────────────
     try:
-        if params.ground_method == "csf":
-            ground_mask_all, nz_all = classify_ground_csf(
-                xyz_all,
-                cloth_resolution=params.csf_cloth_resolution,
-                class_threshold=params.csf_class_threshold,
-                rigidness=params.csf_rigidness,
-                iterations=params.csf_iterations,
-                slope_smooth=params.csf_slope_smooth,
-                csf_voxel_size=params.csf_voxel_size,
-            )
+        if params.ground_source == "from_file":
+            # Use existing classification (class 2 + optionally class 8) from source
+            try:
+                src_cls_core = np.asarray(las_src.classification, dtype=np.uint8)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Cannot read classification field from source: {e}. "
+                    f"Switch Ground source to 'Compute fresh'."
+                )
+            gm_core = ground_mask_from_classification(src_cls_core)
+            n_ground_src = int(gm_core.sum())
+            log(f"  Ground source: existing classification — {n_ground_src:,} ground pts")
+            if n_ground_src < 50:
+                raise RuntimeError(
+                    "Source file has <50 ground points — no usable surface. "
+                    "Switch to 'Compute fresh'."
+                )
+            # nZ derived from the existing ground surface
+            ground_pts = xyz_core[gm_core]
+            nz_core = _compute_nz(xyz_core, ground_pts)
+            ground_mask_all = gm_core
+            nz_all = nz_core      # buffer not used in from_file mode
+            # Skip the buffer-merge slicing — we used core only
+            n_core = len(xyz_core)
+            ground_mask = ground_mask_all
+            nz = nz_all
         else:
-            ground_mask_all, nz_all = classify_ground(
-                xyz_all,
-                cell_size=params.ground_cell_size,
-                ground_threshold=params.ground_threshold,
-                smooth_passes=params.smooth_passes,
-            )
+            # Compute fresh — original CSF / Grid path
+            if params.ground_method == "csf":
+                ground_mask_all, nz_all = classify_ground_csf(
+                    xyz_all,
+                    cloth_resolution=params.csf_cloth_resolution,
+                    class_threshold=params.csf_class_threshold,
+                    rigidness=params.csf_rigidness,
+                    iterations=params.csf_iterations,
+                    slope_smooth=params.csf_slope_smooth,
+                    csf_voxel_size=params.csf_voxel_size,
+                )
+            else:
+                ground_mask_all, nz_all = classify_ground(
+                    xyz_all,
+                    cell_size=params.ground_cell_size,
+                    ground_threshold=params.ground_threshold,
+                    smooth_passes=params.smooth_passes,
+                )
+            n_core = len(xyz_core)
+            ground_mask = ground_mask_all[:n_core]
+            nz = nz_all[:n_core]
     except Exception as e:
         log(f"  ERROR in ground classification: {e}")
         result["status"] = "SKIPPED"
         result["reason"] = f"Ground classification error: {e}"
         return result
-
-    n_core = len(xyz_core)
-    ground_mask = ground_mask_all[:n_core]
-    nz = nz_all[:n_core]
 
     nz_finite = nz[np.isfinite(nz)]
     log(f"  nZ range: {nz_finite.min():.2f} to {nz_finite.max():.2f} m  "
@@ -204,6 +267,38 @@ def _process_one_tile(job: dict) -> dict:
     n_ground = int(ground_mask.sum())
     n_bird = int((classification == 20).sum())
     n_clusters = len(clusters)
+
+    # ── Height-based classification (TerraScan-style) ─────────────────────
+    if params.classify_vegetation:
+        try:
+            classification = classify_heights(
+                classification, nz,
+                veg_low_min=params.veg_low_min,
+                veg_low_max=params.veg_low_max,
+                veg_med_max=params.veg_med_max,
+                noise_below_ground=params.noise_below_ground,
+            )
+            n_low_veg  = int((classification == 3).sum())
+            n_med_veg  = int((classification == 4).sum())
+            n_high_veg = int((classification == 5).sum())
+            n_noise    = int((classification == 7).sum())
+            log(f"  Veg/Noise: low={n_low_veg:,}  med={n_med_veg:,}  "
+                f"high={n_high_veg:,}  noise={n_noise:,}")
+        except Exception as e:
+            log(f"  WARNING: vegetation classification failed: {e}")
+
+    # ── Model keypoints (thinned ground for TIN) ─────────────────────────
+    n_modelkey = 0
+    if params.classify_model_keys:
+        try:
+            classification = classify_model_keypoints(
+                xyz_core, classification,
+                step_m=params.modelkey_step_m,
+            )
+            n_modelkey = int((classification == 8).sum())
+            log(f"  Model keypoints (class 8): {n_modelkey:,} at {params.modelkey_step_m}m step")
+        except Exception as e:
+            log(f"  WARNING: model keypoint classification failed: {e}")
 
     if n_clusters == 0 and n_bird == 0:
         result["status"] = "SKIPPED"
@@ -408,10 +503,15 @@ def process_all_tiles(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tile_index = _build_tile_index(tile_dir)
+    tile_index, idx_stats = _build_tile_index(tile_dir)
     tiles = sorted(tile_index.items())
     total = len(tiles)
-    log_fn(f"Found {total} tiles to process.")
+    log_fn(f"Found {total} tiles to process "
+           f"({idx_stats['grid']} grid-named, {idx_stats['misc']} other).")
+    if idx_stats["grid"] == 0 and idx_stats["misc"] > 0:
+        log_fn("  NOTE: tiles don't follow <easting>_<northing>.laz convention — "
+               "neighbour-buffer loading is disabled for these tiles "
+               "(each tile processed standalone, no edge smoothing).")
 
     # Build per-tile jobs (so workers don't need the tile_index)
     tile_size_int = int(params.tile_size)

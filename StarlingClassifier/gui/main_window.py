@@ -3,7 +3,8 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton,
     QDoubleSpinBox, QSpinBox, QTextEdit, QProgressBar,
-    QFileDialog, QGridLayout, QComboBox, QCheckBox, QStackedWidget
+    QFileDialog, QGridLayout, QComboBox, QCheckBox, QStackedWidget,
+    QScrollArea, QSplitter
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -99,29 +100,56 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Starling Ground-Contact Classifier")
-        self.setMinimumWidth(760)
+        self.setMinimumSize(820, 620)
+        self.resize(1000, 900)
         self._worker: WorkerThread | None = None
         self._build_ui()
 
 
     def _build_ui(self):
-        root = QWidget()
-        self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
-        layout.setSpacing(10)
-        layout.setContentsMargins(12, 12, 12, 12)
+        # ── Scrollable content area (top half) ────────────────────────────
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(10)
+        content_layout.setContentsMargins(12, 12, 12, 12)
+        content_layout.addWidget(self._io_group())
+        content_layout.addWidget(self._ground_group())
+        content_layout.addWidget(self._bird_group())
+        content_layout.addWidget(self._height_group())
+        content_layout.addWidget(self._run_group())
+        content_layout.addStretch(1)
 
-        layout.addWidget(self._io_group())
-        layout.addWidget(self._ground_group())
-        layout.addWidget(self._bird_group())
-        layout.addWidget(self._run_group())
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(content)
 
+        # ── Log box (bottom half — outside scroll so it's always visible) ─
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setFont(QFont("Consolas", 9))
-        self.log_box.setMinimumHeight(160)
-        layout.addWidget(QLabel("Log:"))
-        layout.addWidget(self.log_box)
+        self.log_box.setMinimumHeight(120)
+
+        log_wrap = QWidget()
+        log_lay = QVBoxLayout(log_wrap)
+        log_lay.setContentsMargins(12, 0, 12, 12)
+        log_lay.setSpacing(4)
+        log_lay.addWidget(QLabel("Log:"))
+        log_lay.addWidget(self.log_box)
+
+        # Splitter so the user can drag the divider between params and log
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(scroll)
+        splitter.addWidget(log_wrap)
+        splitter.setStretchFactor(0, 3)   # params get more space initially
+        splitter.setStretchFactor(1, 1)
+
+        root = QWidget()
+        self.setCentralWidget(root)
+        root_lay = QVBoxLayout(root)
+        root_lay.setContentsMargins(0, 0, 0, 0)
+        root_lay.addWidget(splitter)
 
     # ── I/O ──────────────────────────────────────────────────────────────
     def _io_group(self):
@@ -145,6 +173,8 @@ class MainWindow(QMainWindow):
         # ── Folder mode panel ──
         folder_widget = QWidget()
         fg = QGridLayout(folder_widget)
+        fg.setColumnMinimumWidth(0, 110)
+        fg.setColumnStretch(1, 1)
         fg.addWidget(QLabel("Tile folder:"), 0, 0)
         self.tile_edit = QLineEdit()
         self.tile_edit.setPlaceholderText("Folder containing *.laz tiles")
@@ -157,6 +187,8 @@ class MainWindow(QMainWindow):
         # ── Single-file mode panel ──
         file_widget = QWidget()
         ff = QGridLayout(file_widget)
+        ff.setColumnMinimumWidth(0, 110)
+        ff.setColumnStretch(1, 1)
         ff.addWidget(QLabel("LAZ file:"), 0, 0)
         self.file_edit = QLineEdit()
         self.file_edit.setPlaceholderText("Single .laz/.las file — will be tiled automatically")
@@ -188,53 +220,64 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(self.input_stack)
 
-        # Common output controls
+        # Common output controls — fixed-width labels, line edits stretch
         common = QGridLayout()
+        common.setColumnMinimumWidth(0, 110)   # label column
+        common.setColumnStretch(1, 1)           # field column expands
+        common.setColumnMinimumWidth(2, 90)    # browse / second label
+        common.setColumnStretch(3, 0)
+
+        # Row 0 — output folder spans full width
         common.addWidget(QLabel("Output folder:"), 0, 0)
         self.out_edit = QLineEdit()
         self.out_edit.setPlaceholderText("Where to save classified LAS + CSV")
-        common.addWidget(self.out_edit, 0, 1)
+        common.addWidget(self.out_edit, 0, 1, 1, 2)
         btn_out = QPushButton("Browse…")
         btn_out.clicked.connect(self._browse_out)
-        common.addWidget(btn_out, 0, 2)
+        common.addWidget(btn_out, 0, 3)
 
-        common.addWidget(QLabel("Buffer (m):"), 1, 0)
+        # Row 1 — Buffer | Parallel workers  (own narrow cells)
+        import os
+        buf_label = QLabel("Buffer (m):")
+        common.addWidget(buf_label, 1, 0)
         self.buf_spin = QDoubleSpinBox()
         self.buf_spin.setRange(1.0, 20.0)
         self.buf_spin.setValue(5.0)
         self.buf_spin.setSingleStep(1.0)
-        common.addWidget(self.buf_spin, 1, 1)
+        self.buf_spin.setMaximumWidth(120)
+        common.addWidget(self.buf_spin, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        # Parallel workers
-        import os
-        common.addWidget(QLabel("Parallel workers:"), 1, 2)
+        common.addWidget(QLabel("Parallel workers:"), 1, 2,
+                         alignment=Qt.AlignmentFlag.AlignRight)
         self.workers_spin = QSpinBox()
         cpu = os.cpu_count() or 4
         self.workers_spin.setRange(1, max(1, cpu))
-        # Default: half the logical cores, capped at 6 (RAM headroom)
         self.workers_spin.setValue(min(max(1, cpu // 2), 6))
+        self.workers_spin.setMaximumWidth(80)
         self.workers_spin.setToolTip(
             "1 = sequential.  N = run N tiles in parallel processes.\n"
             "Tiles ≥150M points always run solo to protect RAM."
         )
-        common.addWidget(self.workers_spin, 1, 3)
+        common.addWidget(self.workers_spin, 1, 3,
+                         alignment=Qt.AlignmentFlag.AlignLeft)
 
+        # Row 2 — Output format
         common.addWidget(QLabel("Output format:"), 2, 0)
         self.output_format_combo = QComboBox()
         self.output_format_combo.addItem("LAZ  (compressed)", "laz")
         self.output_format_combo.addItem("LAS  (uncompressed)", "las")
         self.output_format_combo.setCurrentIndex(0)
-        common.addWidget(self.output_format_combo, 2, 1)
+        common.addWidget(self.output_format_combo, 2, 1, 1, 3)
 
+        # Row 3 — LAS version
         common.addWidget(QLabel("LAS version:"), 3, 0)
         self.las_version_combo = QComboBox()
         self.las_version_combo.addItem("1.4", "1.4")
         self.las_version_combo.addItem("1.2", "1.2")
         self.las_version_combo.setCurrentIndex(0)
-        common.addWidget(self.las_version_combo, 3, 1)
+        common.addWidget(self.las_version_combo, 3, 1, 1, 3)
 
         outer.addLayout(common)
-
         return grp
 
     def _on_input_mode_change(self, idx):
@@ -245,7 +288,22 @@ class MainWindow(QMainWindow):
         grp = QGroupBox("Ground Classification")
         outer = QVBoxLayout(grp)
 
-        # Method selector
+        # Source selector — compute fresh OR use existing class 2 from source
+        src_row = QHBoxLayout()
+        src_row.addWidget(QLabel("Source:"))
+        self.ground_src_combo = QComboBox()
+        self.ground_src_combo.addItem(
+            "Compute fresh  (run CSF / Grid Minimum)", "compute"
+        )
+        self.ground_src_combo.addItem(
+            "Use existing classification 2 from source LAS", "from_file"
+        )
+        self.ground_src_combo.currentIndexChanged.connect(self._on_ground_src_change)
+        src_row.addWidget(self.ground_src_combo)
+        src_row.addStretch()
+        outer.addLayout(src_row)
+
+        # Method selector — only relevant when computing fresh
         method_row = QHBoxLayout()
         method_row.addWidget(QLabel("Method:"))
         self.method_combo = QComboBox()
@@ -287,6 +345,12 @@ class MainWindow(QMainWindow):
     def _on_method_change(self, idx):
         self.ground_stack.setCurrentIndex(idx)
 
+    def _on_ground_src_change(self, idx):
+        # When using existing classification, hide method + param panels
+        from_file = (self.ground_src_combo.currentData() == "from_file")
+        self.method_combo.setEnabled(not from_file)
+        self.ground_stack.setEnabled(not from_file)
+
     # ── Bird detection ────────────────────────────────────────────────────
     def _bird_group(self):
         grp = QGroupBox("Bird Contact Detection")
@@ -298,6 +362,38 @@ class MainWindow(QMainWindow):
         self._add_spin(g, 3, "DBSCAN min points:", 2, 100, 8, "dbscan_min")
         self._add_dspin(g, 4, "Min cluster footprint (m²):", 0.001, 0.10, 0.005, 0.001, "min_foot")
         self._add_dspin(g, 5, "Max cluster footprint (m²):", 0.10, 5.00, 1.00, 0.10, "max_foot")
+
+        return grp
+
+    # ── Height classification (TerraScan-style) ──────────────────────────
+    def _height_group(self):
+        grp = QGroupBox("Height Classification  (vegetation + low noise + model keypoints)")
+        outer = QVBoxLayout(grp)
+
+        # Master toggle
+        self.veg_enable_chk = QCheckBox(
+            "Classify vegetation by height above ground  (classes 3 / 4 / 5 / 7)"
+        )
+        self.veg_enable_chk.setChecked(True)
+        outer.addWidget(self.veg_enable_chk)
+
+        g = QGridLayout()
+        self._add_dspin(g, 0, "Low veg starts at nZ (m):",   0.02, 1.0, 0.10, 0.01, "veg_low_min")
+        self._add_dspin(g, 1, "Low / Med boundary nZ (m):",  0.20, 5.0, 1.00, 0.10, "veg_low_max")
+        self._add_dspin(g, 2, "Med / High boundary nZ (m):", 1.00, 20.0, 3.00, 0.50, "veg_med_max")
+        self._add_dspin(g, 3, "Low noise threshold nZ (m):", -2.0, -0.01, -0.10, 0.01, "noise_thr")
+        outer.addLayout(g)
+
+        # Model keypoints
+        self.modelkey_chk = QCheckBox(
+            "Also classify model keypoints  (class 8 — thinned ground for TIN building)"
+        )
+        self.modelkey_chk.setChecked(False)
+        outer.addWidget(self.modelkey_chk)
+
+        g2 = QGridLayout()
+        self._add_dspin(g2, 0, "Model keypoint grid step (m):", 1.0, 50.0, 8.0, 1.0, "modelkey_step")
+        outer.addLayout(g2)
 
         return grp
 
@@ -370,6 +466,7 @@ class MainWindow(QMainWindow):
             buffer_m=self.buf_spin.value(),
             output_format=self.output_format_combo.currentData(),
             las_version=self.las_version_combo.currentData(),
+            ground_source=self.ground_src_combo.currentData(),
             ground_method=method,
             num_workers=self.workers_spin.value(),
             # CSF params
@@ -390,6 +487,14 @@ class MainWindow(QMainWindow):
             dbscan_min_pts=self._dbscan_min.value(),
             min_footprint_m2=self._min_foot.value(),
             max_footprint_m2=self._max_foot.value(),
+            # Height classification
+            classify_vegetation=self.veg_enable_chk.isChecked(),
+            veg_low_min=self._veg_low_min.value(),
+            veg_low_max=self._veg_low_max.value(),
+            veg_med_max=self._veg_med_max.value(),
+            noise_below_ground=self._noise_thr.value(),
+            classify_model_keys=self.modelkey_chk.isChecked(),
+            modelkey_step_m=self._modelkey_step.value(),
         )
 
     def _start(self):

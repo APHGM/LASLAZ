@@ -142,7 +142,17 @@ If you already have tiles named `<easting>_<northing>.laz`.
 4. Choose output folder, click Start
 
 ### Output
-- `<tilename>_classified.laz` — LAS/LAZ with classification 2 (ground), 20 (bird), 1 (unclassified)
+- `<tilename>_classified.laz` — LAS/LAZ with ASPRS classification codes:
+  | Class | Meaning |
+  |---|---|
+  | 1 | Unclassified |
+  | **2** | **Ground** |
+  | **3** | **Low vegetation** (0.10 – 1.0 m above ground) |
+  | **4** | **Medium vegetation** (1.0 – 3.0 m) |
+  | **5** | **High vegetation** (≥ 3.0 m) |
+  | **7** | **Low noise** (below ground surface) |
+  | **8** | **Model keypoints** (thinned ground for TIN) — optional |
+  | **20** | **Bird contact** |
 - `bird_contacts.csv` — one row per detected bird cluster (centroid X/Y/Z, point count, footprint)
 - `processing_summary.txt` — human-readable processing report
 
@@ -160,10 +170,29 @@ If you already have tiles named `<easting>_<northing>.laz`.
 | LAS version | 1.4 (newer, recommended) or 1.2 (compatibility) |
 
 ### Ground Classification
+| Source | When to use |
+|---|---|
+| **Compute fresh** | Default. Runs CSF or Grid Minimum on the points. |
+| **Use existing classification 2** | When the LAS already has ground classified (e.g. from TerraScan / scanner software). Skips CSF, reads class 2 directly, only runs vegetation/bird detection on top. |
+
 | Method | When to use |
 |---|---|
-| **CSF** (Cloth Simulation Filter) | **Recommended.** Handles slopes, vegetation, buildings well. |
+| **CSF** (Cloth Simulation Filter) | **Recommended** for "Compute fresh". Handles slopes, vegetation, buildings well. |
 | **Grid Minimum** | Fallback for very flat ground or when CSF is unavailable. Pure numpy/scipy. |
+
+### Height Classification (new — TerraScan-style)
+| Field | Description |
+|---|---|
+| Classify vegetation by height | Toggle — runs height-band classification using `nZ` from ground stage |
+| Low veg starts at nZ | Default 0.10 m (excludes ground noise) |
+| Low / Med boundary | Default 1.00 m |
+| Med / High boundary | Default 3.00 m |
+| Low noise threshold | Default −0.10 m (points below ground = class 7) |
+| Classify model keypoints | Toggle — keeps lowest ground point per N × N grid cell as class 8 |
+| Model keypoint grid step | Default 8 m (matches TerraScan macro convention) |
+
+These mirror the TerraScan macro functions `FnScanClassifyHgtGrd`, `FnScanClassifyLow`,
+and `FnScanClassifyModelKey`.
 
 ### Bird Contact Detection
 | Field | Description |
@@ -402,6 +431,8 @@ re-discovering it.
 - **v1.4** — Added LAS/LAZ output format choice, LAS version selection
 - **v1.5** — Added parallel processing with auto-throttle for giant tiles
 - **v1.6** — Added "Skip tiling" mode for small-to-medium files
+- **v1.7** — Drone-LiDAR fix: RGB and extra dimensions now preserved through tiling and write
+- **v1.8** — TerraScan-style height classification (low/med/high veg, low noise, model keypoints) + "Use existing classification 2" ground source
 
 ---
 
