@@ -12,6 +12,9 @@ from PyQt6.QtGui import QFont
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from collapsible import CollapsibleSection
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from processing.tile_processor import (
     ProcessParams, process_all_tiles, process_single_file
@@ -100,8 +103,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Starling Ground-Contact Classifier")
-        self.setMinimumSize(820, 620)
-        self.resize(1000, 900)
+        self.setMinimumSize(700, 460)
+        self.resize(900, 600)
         self._worker: WorkerThread | None = None
         self._build_ui()
 
@@ -153,8 +156,8 @@ class MainWindow(QMainWindow):
 
     # ── I/O ──────────────────────────────────────────────────────────────
     def _io_group(self):
-        grp = QGroupBox("Input / Output")
-        outer = QVBoxLayout(grp)
+        sec = CollapsibleSection("Input / Output", start_open=True)
+        outer = sec.content_layout
 
         # Mode selector
         mode_row = QHBoxLayout()
@@ -278,15 +281,15 @@ class MainWindow(QMainWindow):
         common.addWidget(self.las_version_combo, 3, 1, 1, 3)
 
         outer.addLayout(common)
-        return grp
+        return sec
 
     def _on_input_mode_change(self, idx):
         self.input_stack.setCurrentIndex(idx)
 
     # ── Ground ───────────────────────────────────────────────────────────
     def _ground_group(self):
-        grp = QGroupBox("Ground Classification")
-        outer = QVBoxLayout(grp)
+        sec = CollapsibleSection("Ground Classification", start_open=False)
+        outer = sec.content_layout
 
         # Source selector — compute fresh OR use existing class 2 from source
         src_row = QHBoxLayout()
@@ -340,7 +343,7 @@ class MainWindow(QMainWindow):
         self.ground_stack.addWidget(grid_widget)
 
         outer.addWidget(self.ground_stack)
-        return grp
+        return sec
 
     def _on_method_change(self, idx):
         self.ground_stack.setCurrentIndex(idx)
@@ -353,8 +356,10 @@ class MainWindow(QMainWindow):
 
     # ── Bird detection ────────────────────────────────────────────────────
     def _bird_group(self):
-        grp = QGroupBox("Bird Contact Detection")
-        g = QGridLayout(grp)
+        sec = CollapsibleSection("Bird Contact Detection", start_open=False)
+        grid_w = QWidget()
+        g = QGridLayout(grid_w)
+        g.setContentsMargins(0, 0, 0, 0)
 
         self._add_dspin(g, 0, "Min height above ground (m):", 0.01, 0.20, 0.02, 0.01, "nz_min")
         self._add_dspin(g, 1, "Max height above ground (m):", 0.10, 1.00, 0.40, 0.05, "nz_max")
@@ -363,12 +368,16 @@ class MainWindow(QMainWindow):
         self._add_dspin(g, 4, "Min cluster footprint (m²):", 0.001, 0.10, 0.005, 0.001, "min_foot")
         self._add_dspin(g, 5, "Max cluster footprint (m²):", 0.10, 5.00, 1.00, 0.10, "max_foot")
 
-        return grp
+        sec.content_layout.addWidget(grid_w)
+        return sec
 
     # ── Height classification (TerraScan-style) ──────────────────────────
     def _height_group(self):
-        grp = QGroupBox("Height Classification  (vegetation + low noise + model keypoints)")
-        outer = QVBoxLayout(grp)
+        sec = CollapsibleSection(
+            "Height Classification  (vegetation + low noise + model keypoints)",
+            start_open=False,
+        )
+        outer = sec.content_layout
 
         # Master toggle
         self.veg_enable_chk = QCheckBox(
@@ -395,7 +404,7 @@ class MainWindow(QMainWindow):
         self._add_dspin(g2, 0, "Model keypoint grid step (m):", 1.0, 50.0, 8.0, 1.0, "modelkey_step")
         outer.addLayout(g2)
 
-        return grp
+        return sec
 
     # ── Run / progress ────────────────────────────────────────────────────
     def _run_group(self):
