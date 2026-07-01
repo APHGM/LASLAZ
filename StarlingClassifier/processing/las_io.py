@@ -42,9 +42,12 @@ def write_classified_laz(
     fmt_norm = (output_format or "laz").strip().lower()
     fmt = "laz" if "laz" in fmt_norm else "las"
 
-    # Normalise version to "1.x"
-    ver_norm = (las_version or "1.4").strip()
-    if not ver_norm.startswith("1."):
+    # Normalise version — "match" means use the source's version
+    ver_norm = (las_version or "1.4").strip().lower()
+    if ver_norm == "match":
+        src_ver = source_las.header.version
+        ver_norm = f"{src_ver.major}.{src_ver.minor}"
+    elif not ver_norm.startswith("1."):
         ver_norm = "1.4"
 
     # Build header preserving point format ID, extra dims, and VLRs
@@ -70,17 +73,40 @@ def write_classified_laz(
         pass
 
     out = laspy.LasData(header=header)
-    out.x = xyz[:, 0]
-    out.y = xyz[:, 1]
-    out.z = xyz[:, 2]
+
+    # ── Preserve EVERY field by copying the packed point record ──────────
+    # This single line keeps X/Y/Z, intensity, RGB, GPS time, return number,
+    # scan angle, etc. — anything the source has. We DON'T re-set X/Y/Z
+    # because they're already correct (xyz came from this same source).
+    # Re-assigning out.x = ... after out.points = ... breaks laspy's
+    # internal property bindings (lowercase x vs uppercase X field).
+    if len(classification) != len(source_las.points):
+        raise ValueError(
+            f"classification length ({len(classification)}) does not match "
+            f"source point count ({len(source_las.points)})."
+        )
+    out.points = source_las.points.copy()
     out.classification = classification.astype(np.uint8)
 
-    # Copy every other dimension from source (RGB, intensity, GPS time, return num, etc.)
-    for dim in source_las.point_format.dimension_names:
-        if dim in ("X", "Y", "Z", "classification"):
-            continue
+    # ── Back-fill LAS 1.2/1.3 legacy point-count fields ───────────────────
+    # laspy 2.6.x writes the extended (LAS 1.4) point count correctly but
+    # leaves the legacy 32-bit field at 0, which trips up lasinfo and any
+    # older LAS-1.2-only reader. Populate it explicitly when it fits.
+    n_pts = len(out.points)
+    if n_pts < (1 << 32):
         try:
-            setattr(out, dim, getattr(source_las, dim))
+            out.header.point_count = n_pts
+        except Exception:
+            pass
+        try:
+            # All-single-return common case; if you need finer return-number
+            # accounting, recompute from out.return_number instead.
+            import numpy as _np
+            counts = _np.zeros(5, dtype=_np.uint32)
+            rn = _np.asarray(out.return_number, dtype=_np.int32)
+            for i in range(1, 6):
+                counts[i - 1] = int((rn == i).sum())
+            out.header.number_of_points_by_return = counts
         except Exception:
             pass
 

@@ -4,7 +4,9 @@ PyInstaller spec — Starling Classifier.
 Run:  pyinstaller --noconfirm --clean build.spec
 """
 import os
-from PyInstaller.utils.hooks import collect_submodules, collect_dynamic_libs
+from PyInstaller.utils.hooks import (
+    collect_submodules, collect_dynamic_libs, collect_data_files, collect_all,
+)
 
 # Force UTF-8 in the bundled exe so unicode chars (✓, °, ²) don't crash
 os.environ["PYTHONIOENCODING"] = "utf-8"
@@ -20,10 +22,25 @@ hiddenimports = [
     "scipy.spatial.transform._rotation_groups",
     "scipy._lib.array_api_compat.numpy.fft",
     "lazrs",
+    "psutil",
 ]
 hiddenimports += collect_submodules("CSF")
+# Explicit local-package submodules — PyInstaller's static analysis sometimes
+# misses these on multiprocessing spawn or dynamic imports
+hiddenimports += collect_submodules("gui")
+hiddenimports += collect_submodules("processing")
 
 binaries = collect_dynamic_libs("CSF")
+datas = []
+
+# ezdxf ships font definitions, default DXF templates, and uses pyparsing
+# internally — collect_all grabs submodules + data files + binaries together.
+ezdxf_datas, ezdxf_bins, ezdxf_hidden = collect_all("ezdxf")
+datas    += ezdxf_datas
+binaries += ezdxf_bins
+hiddenimports += ezdxf_hidden
+# pyparsing is a runtime dependency of ezdxf
+hiddenimports += ["pyparsing"]
 
 # Large frameworks we definitely don't use.
 # NOTE: do NOT add `pandas` here — the cloth-simulation-filter (CSF) package
@@ -47,9 +64,9 @@ excludes = [
 
 a = Analysis(
     ["main.py"],
-    pathex=[],
+    pathex=[os.path.abspath(".")],   # so gui/, processing/ are seen as packages
     binaries=binaries,
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

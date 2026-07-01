@@ -4,16 +4,15 @@ Drop-in replacement for QGroupBox when you want compact UI.
 """
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QToolButton, QFrame, QSizePolicy
+    QWidget, QVBoxLayout, QHBoxLayout, QToolButton, QFrame, QSizePolicy, QLabel
 )
 
 
 class CollapsibleSection(QWidget):
     """
     Click the header to expand/collapse. Content lives inside .content_layout.
-    Usage:
-        sec = CollapsibleSection("Bird Detection", start_open=False)
-        sec.content_layout.addWidget(my_grid_widget)
+    Set a live status string with set_status(text, color) — shown on the right
+    of the header so the user can see current settings without expanding.
     """
     def __init__(self, title: str, start_open: bool = False, parent=None):
         super().__init__(parent)
@@ -36,6 +35,24 @@ class CollapsibleSection(QWidget):
         self.toggle_btn.setChecked(start_open)
         self.toggle_btn.toggled.connect(self._on_toggle)
 
+        # Live status badge — shows current config summary
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet(
+            "color: #8aa; padding-right: 10px; font-size: 11px;"
+        )
+        self.status_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        # Header row: toggle | stretch | status
+        header = QWidget()
+        h_lay = QHBoxLayout(header)
+        h_lay.setContentsMargins(0, 0, 0, 0)
+        h_lay.setSpacing(0)
+        h_lay.addWidget(self.toggle_btn, 0)
+        h_lay.addStretch(1)
+        h_lay.addWidget(self.status_label, 0)
+
         # Visual divider line
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
@@ -53,7 +70,7 @@ class CollapsibleSection(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        outer.addWidget(self.toggle_btn)
+        outer.addWidget(header)
         outer.addWidget(line)
         outer.addWidget(self.content)
 
@@ -67,3 +84,10 @@ class CollapsibleSection(QWidget):
 
     def set_open(self, open_state: bool):
         self.toggle_btn.setChecked(open_state)
+
+    def set_status(self, text: str, color: str = "#8aa"):
+        """Update the small status line on the right side of the header."""
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(
+            f"color: {color}; padding-right: 10px; font-size: 11px;"
+        )

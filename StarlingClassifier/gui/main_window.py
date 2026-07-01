@@ -12,14 +12,13 @@ from PyQt6.QtGui import QFont
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from collapsible import CollapsibleSection
+from gui.collapsible import CollapsibleSection
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from processing.tile_processor import (
     ProcessParams, process_all_tiles, process_single_file
 )
-from processing.tiler import tile_file
+from processing.tiler import tile_file, merge_las_files
 
 
 class WorkerThread(QThread):
@@ -28,14 +27,18 @@ class WorkerThread(QThread):
     finished = pyqtSignal(str)
 
     def __init__(self, mode, source, out_dir, params,
-                 tile_size=100.0, skip_tiling=False):
+                 tile_size=100.0, skip_tiling=False,
+                 multi_files: list[str] | None = None,
+                 merged_name: str = ""):
         """
-        mode         : "folder" or "file"
-        source       : tile folder path (folder mode) or LAZ file path (file mode)
+        mode         : "folder" | "file" | "multi"
+        source       : tile folder (folder), LAZ file (file), or "" (multi — uses multi_files)
         out_dir      : output folder for classified results
         params       : ProcessParams
-        tile_size    : metres (only used in file mode when skip_tiling=False)
-        skip_tiling  : if True (file mode only), process whole file as one
+        tile_size    : metres (when tiling is used)
+        skip_tiling  : if True, process the single/merged file as one (no tile split)
+        multi_files  : list of file paths to merge (multi mode only)
+        merged_name  : output filename for the merged LAZ (multi mode); blank = auto
         """
         super().__init__()
         self.mode = mode
@@ -44,35 +47,69 @@ class WorkerThread(QThread):
         self.params = params
         self.tile_size = tile_size
         self.skip_tiling = skip_tiling
+        self.multi_files = multi_files or []
+        self.merged_name = merged_name
         self._cancel = False
 
     def cancel(self):
         self._cancel = True
 
+    def _process_single_or_tile(self, file_path: str):
+        """Shared path for single-file modes (skip tiling OR auto-tile)."""
+        if self.skip_tiling:
+            csv_path = process_single_file(
+                file_path=file_path,
+                out_dir=self.out_dir,
+                params=self.params,
+                log_fn=self.log.emit,
+                progress_fn=self.progress.emit,
+                cancelled_fn=lambda: self._cancel,
+            )
+            return csv_path
+
+        src = Path(file_path)
+        tile_dir = src.parent / f"Tile_{src.stem}"
+        self.log.emit(f"Tiling to: {tile_dir}")
+        tile_file(
+            in_path=str(src),
+            out_dir=str(tile_dir),
+            tile_size=self.tile_size,
+            log_fn=self.log.emit,
+            progress_fn=self.progress.emit,
+            cancelled_fn=lambda: self._cancel,
+        )
+        if self._cancel:
+            return ""
+        self.log.emit("Tiling complete — starting classification.\n")
+        return process_all_tiles(
+            tile_dir=str(tile_dir),
+            out_dir=self.out_dir,
+            params=self.params,
+            log_fn=self.log.emit,
+            progress_fn=self.progress.emit,
+            cancelled_fn=lambda: self._cancel,
+        )
+
     def run(self):
         try:
-            # ── Single file + skip tiling: direct one-shot path ─────────
-            if self.mode == "file" and self.skip_tiling:
-                csv_path = process_single_file(
-                    file_path=self.source,
-                    out_dir=self.out_dir,
-                    params=self.params,
-                    log_fn=self.log.emit,
-                    progress_fn=self.progress.emit,
-                    cancelled_fn=lambda: self._cancel,
-                )
-                self.finished.emit(str(csv_path))
-                return
+            # ── Multi-file → merge → process ─────────────────────────────
+            if self.mode == "multi":
+                if not self.multi_files:
+                    self.log.emit("ERROR: no files selected.")
+                    self.finished.emit("")
+                    return
 
-            # ── Single file → tile first ────────────────────────────────
-            if self.mode == "file":
-                src = Path(self.source)
-                tile_dir = src.parent / f"Tile_{src.stem}"
-                self.log.emit(f"Single-file mode — tiling to: {tile_dir}")
-                tile_file(
-                    in_path=str(src),
-                    out_dir=str(tile_dir),
-                    tile_size=self.tile_size,
+                first = Path(self.multi_files[0])
+                if self.merged_name.strip():
+                    merged_path = first.parent / Path(self.merged_name).name
+                    if not merged_path.suffix:
+                        merged_path = merged_path.with_suffix(".laz")
+                else:
+                    merged_path = first.parent / f"{first.stem}_merged.laz"
+
+                merge_las_files(
+                    in_paths=self.multi_files,
+                    out_path=merged_path,
                     log_fn=self.log.emit,
                     progress_fn=self.progress.emit,
                     cancelled_fn=lambda: self._cancel,
@@ -80,13 +117,21 @@ class WorkerThread(QThread):
                 if self._cancel:
                     self.finished.emit("")
                     return
-                self.log.emit("Tiling complete — starting classification.\n")
-                tile_dir_str = str(tile_dir)
-            else:
-                tile_dir_str = self.source
 
+                self.log.emit(f"\nMerged file: {merged_path}\nStarting classification...\n")
+                csv_path = self._process_single_or_tile(str(merged_path))
+                self.finished.emit(str(csv_path) if csv_path else "")
+                return
+
+            # ── Single file ───────────────────────────────────────────────
+            if self.mode == "file":
+                csv_path = self._process_single_or_tile(self.source)
+                self.finished.emit(str(csv_path) if csv_path else "")
+                return
+
+            # ── Folder mode ───────────────────────────────────────────────
             csv_path = process_all_tiles(
-                tile_dir=tile_dir_str,
+                tile_dir=self.source,
                 out_dir=self.out_dir,
                 params=self.params,
                 log_fn=self.log.emit,
@@ -115,12 +160,20 @@ class MainWindow(QMainWindow):
         content_layout = QVBoxLayout(content)
         content_layout.setSpacing(10)
         content_layout.setContentsMargins(12, 12, 12, 12)
-        content_layout.addWidget(self._io_group())
-        content_layout.addWidget(self._ground_group())
-        content_layout.addWidget(self._bird_group())
-        content_layout.addWidget(self._height_group())
+        self._sec_io     = self._io_group()
+        self._sec_ground = self._ground_group()
+        self._sec_bird   = self._bird_group()
+        self._sec_height = self._height_group()
+        content_layout.addWidget(self._sec_io)
+        content_layout.addWidget(self._sec_ground)
+        content_layout.addWidget(self._sec_bird)
+        content_layout.addWidget(self._sec_height)
         content_layout.addWidget(self._run_group())
-        content_layout.addStretch(1)
+        # NO stretch at bottom — content should hug the top, log takes the rest
+
+        # Wire status-badge refresh on relevant control changes
+        self._wire_status_badges()
+        self._refresh_status_badges()
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -136,17 +189,31 @@ class MainWindow(QMainWindow):
 
         log_wrap = QWidget()
         log_lay = QVBoxLayout(log_wrap)
-        log_lay.setContentsMargins(12, 0, 12, 12)
+        # Right margin matches the scroll area's vertical scrollbar width so
+        # the log box aligns horizontally with the settings panels above
+        # (whether the scrollbar is currently visible or reserved).
+        sb_width = scroll.verticalScrollBar().sizeHint().width()
+        log_lay.setContentsMargins(12, 0, 12 + sb_width, 12)
         log_lay.setSpacing(4)
         log_lay.addWidget(QLabel("Log:"))
         log_lay.addWidget(self.log_box)
+
+        # Force the scroll area to ALWAYS reserve scrollbar space so the
+        # margin math above stays correct regardless of content height
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
 
         # Splitter so the user can drag the divider between params and log
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(scroll)
         splitter.addWidget(log_wrap)
-        splitter.setStretchFactor(0, 3)   # params get more space initially
+        # Stretch factors: 0 = don't grow this pane, 1 = fill remaining space.
+        # Scroll area sizes to content; log fills everything below.
+        splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        # Initial split: give scroll just enough for compact/collapsed content
+        splitter.setSizes([320, 500])
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -165,6 +232,7 @@ class MainWindow(QMainWindow):
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Tile folder  (pre-tiled *.laz files)", "folder")
         self.mode_combo.addItem("Single LAZ file  (auto-tile then process)", "file")
+        self.mode_combo.addItem("Multiple LAZ files  (merge then process)", "multi")
         self.mode_combo.currentIndexChanged.connect(self._on_input_mode_change)
         mode_row.addWidget(self.mode_combo)
         mode_row.addStretch()
@@ -221,6 +289,49 @@ class MainWindow(QMainWindow):
 
         self.input_stack.addWidget(file_widget)
 
+        # ── Multi-file mode panel ──
+        multi_widget = QWidget()
+        mf = QGridLayout(multi_widget)
+        mf.setColumnMinimumWidth(0, 110)
+        mf.setColumnStretch(1, 1)
+        mf.addWidget(QLabel("LAZ files:"), 0, 0)
+        self.files_list = QTextEdit()
+        self.files_list.setPlaceholderText(
+            "Click Browse to pick multiple LAZ/LAS files (Ctrl+click to multi-select)"
+        )
+        self.files_list.setMaximumHeight(80)
+        self.files_list.setReadOnly(True)
+        mf.addWidget(self.files_list, 0, 1)
+        btn_files = QPushButton("Browse…")
+        btn_files.clicked.connect(self._browse_multi_files)
+        mf.addWidget(btn_files, 0, 2)
+
+        mf.addWidget(QLabel("Merged output:"), 1, 0)
+        self.merged_name_edit = QLineEdit()
+        self.merged_name_edit.setPlaceholderText("e.g. site_merged.laz  (auto-named if blank)")
+        mf.addWidget(self.merged_name_edit, 1, 1, 1, 2)
+
+        self.multi_skip_tile_chk = QCheckBox(
+            "Skip tiling after merge — process whole merged file as one  "
+            "(recommended for total < ~300 M points)"
+        )
+        self.multi_skip_tile_chk.setChecked(True)   # default ON for merged mode
+        mf.addWidget(self.multi_skip_tile_chk, 2, 0, 1, 3)
+
+        mf.addWidget(QLabel("Tile size (m):"), 3, 0)
+        self.multi_tile_size_spin = QDoubleSpinBox()
+        self.multi_tile_size_spin.setRange(10.0, 500.0)
+        self.multi_tile_size_spin.setValue(100.0)
+        self.multi_tile_size_spin.setSingleStep(5.0)
+        self.multi_tile_size_spin.setEnabled(False)
+        mf.addWidget(self.multi_tile_size_spin, 3, 1)
+        self.multi_skip_tile_chk.toggled.connect(
+            lambda on: self.multi_tile_size_spin.setEnabled(not on)
+        )
+
+        self._multi_files: list[str] = []
+        self.input_stack.addWidget(multi_widget)
+
         outer.addWidget(self.input_stack)
 
         # Common output controls — fixed-width labels, line edits stretch
@@ -275,10 +386,25 @@ class MainWindow(QMainWindow):
         # Row 3 — LAS version
         common.addWidget(QLabel("LAS version:"), 3, 0)
         self.las_version_combo = QComboBox()
+        self.las_version_combo.addItem("Match source  (recommended)", "match")
         self.las_version_combo.addItem("1.4", "1.4")
         self.las_version_combo.addItem("1.2", "1.2")
         self.las_version_combo.setCurrentIndex(0)
         common.addWidget(self.las_version_combo, 3, 1, 1, 3)
+
+        # Row 4 — Merge output tiles into single LAZ
+        self.merge_output_chk = QCheckBox(
+            "Merge output tiles into single LAZ  "
+            "(recommended for single-file and multi-merge modes)"
+        )
+        self.merge_output_chk.setChecked(True)
+        self.merge_output_chk.setToolTip(
+            "After classification finishes, all *_classified.laz tiles are stream-merged\n"
+            "into one final LAZ. Individual tile files are moved to a _shards_* subfolder\n"
+            "so the top-level output folder shows one clean classified file.\n\n"
+            "Uncheck if you want to keep the per-tile outputs as-is."
+        )
+        common.addWidget(self.merge_output_chk, 4, 0, 1, 4)
 
         outer.addLayout(common)
         return sec
@@ -461,6 +587,16 @@ class MainWindow(QMainWindow):
         if f:
             self.file_edit.setText(f)
 
+    def _browse_multi_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select multiple LAZ / LAS files (Ctrl+click)", "",
+            "LAS/LAZ files (*.laz *.las);;All files (*.*)"
+        )
+        if files:
+            self._multi_files = files
+            self.files_list.setPlainText("\n".join(files))
+            self._log(f"{len(files)} file(s) selected for merging.")
+
     def _browse_out(self):
         d = QFileDialog.getExistingDirectory(self, "Select output folder")
         if d:
@@ -504,7 +640,74 @@ class MainWindow(QMainWindow):
             noise_below_ground=self._noise_thr.value(),
             classify_model_keys=self.modelkey_chk.isChecked(),
             modelkey_step_m=self._modelkey_step.value(),
+            merge_output_to_single=self.merge_output_chk.isChecked(),
         )
+
+    # ── Status badges on collapsed section headers ────────────────────────
+    def _wire_status_badges(self):
+        """Connect every control whose change should refresh the badges."""
+        # I/O
+        self.mode_combo.currentIndexChanged.connect(self._refresh_status_badges)
+        self.workers_spin.valueChanged.connect(self._refresh_status_badges)
+        self.output_format_combo.currentIndexChanged.connect(self._refresh_status_badges)
+        self.skip_tile_chk.toggled.connect(self._refresh_status_badges)
+        self.merge_output_chk.toggled.connect(self._refresh_status_badges)
+        # Ground
+        self.ground_src_combo.currentIndexChanged.connect(self._refresh_status_badges)
+        self.method_combo.currentIndexChanged.connect(self._refresh_status_badges)
+        # Bird (always on — but show key thresholds)
+        self._nz_min.valueChanged.connect(self._refresh_status_badges)
+        self._nz_max.valueChanged.connect(self._refresh_status_badges)
+        # Height
+        self.veg_enable_chk.toggled.connect(self._refresh_status_badges)
+        self.modelkey_chk.toggled.connect(self._refresh_status_badges)
+
+    def _refresh_status_badges(self):
+        """Rebuild each section's right-hand summary text."""
+        # ── Input / Output ─────────────────────────────────────────────
+        mc = self.mode_combo.currentData()
+        if mc == "folder":
+            mode = "Tile folder"
+        elif mc == "file":
+            mode = "Single LAZ"
+            if self.skip_tile_chk.isChecked():
+                mode += " (no tile)"
+        else:   # multi
+            n = len(self._multi_files) if self._multi_files else 0
+            mode = f"Multi-merge ({n} files)"
+            if self.multi_skip_tile_chk.isChecked():
+                mode += " (no tile)"
+        fmt = self.output_format_combo.currentData().upper()
+        workers = self.workers_spin.value()
+        worker_txt = "1 worker" if workers == 1 else f"{workers} workers"
+        merge_txt = " · merge→1" if self.merge_output_chk.isChecked() else " · tiles kept"
+        self._sec_io.set_status(f"{mode} · {fmt} · {worker_txt}{merge_txt}", "#8cf")
+
+        # ── Ground Classification ──────────────────────────────────────
+        src = self.ground_src_combo.currentData()
+        if src == "from_file":
+            self._sec_ground.set_status("Use existing class 2", "#fc8")
+        else:
+            method = self.method_combo.currentData().upper()
+            self._sec_ground.set_status(f"Compute fresh · {method}", "#8fc")
+
+        # ── Bird Contact Detection ─────────────────────────────────────
+        self._sec_bird.set_status(
+            f"nZ {self._nz_min.value():.2f}–{self._nz_max.value():.2f} m · ON",
+            "#8fc",
+        )
+
+        # ── Height Classification ──────────────────────────────────────
+        veg_on = self.veg_enable_chk.isChecked()
+        key_on = self.modelkey_chk.isChecked()
+        if not veg_on and not key_on:
+            self._sec_height.set_status("OFF", "#888")
+        else:
+            parts = []
+            parts.append("Veg ON" if veg_on else "Veg OFF")
+            parts.append("Keys ON" if key_on else "Keys OFF")
+            colour = "#8fc" if veg_on else "#fc8"
+            self._sec_height.set_status(" · ".join(parts), colour)
 
     def _start(self):
         mode = self.mode_combo.currentData()
@@ -514,28 +717,51 @@ class MainWindow(QMainWindow):
             self._log("ERROR: Select an output folder.")
             return
 
+        source = ""
+        tile_size = 100.0
+        skip_tiling = False
+        multi_files: list[str] = []
+        merged_name = ""
+
         if mode == "folder":
             source = self.tile_edit.text().strip()
             if not source or not Path(source).is_dir():
                 self._log("ERROR: Select a valid tile folder.")
                 return
-            tile_size = 100.0
-        else:
+        elif mode == "file":
             source = self.file_edit.text().strip()
             if not source or not Path(source).is_file():
                 self._log("ERROR: Select a valid LAZ file.")
                 return
             tile_size = self.tile_size_spin.value()
+            skip_tiling = self.skip_tile_chk.isChecked()
+        elif mode == "multi":
+            multi_files = list(self._multi_files)
+            if not multi_files:
+                self._log("ERROR: Select multiple LAZ files via Browse.")
+                return
+            for f in multi_files:
+                if not Path(f).is_file():
+                    self._log(f"ERROR: file not found: {f}")
+                    return
+            tile_size = self.multi_tile_size_spin.value()
+            skip_tiling = self.multi_skip_tile_chk.isChecked()
+            merged_name = self.merged_name_edit.text().strip()
+        else:
+            self._log(f"ERROR: unknown mode {mode!r}")
+            return
 
         params = self._build_params()
         self.progress_bar.setValue(0)
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
-        skip_tiling = (mode == "file") and self.skip_tile_chk.isChecked()
         self._worker = WorkerThread(
             mode, source, out_dir, params,
-            tile_size=tile_size, skip_tiling=skip_tiling,
+            tile_size=tile_size,
+            skip_tiling=skip_tiling,
+            multi_files=multi_files,
+            merged_name=merged_name,
         )
         self._worker.log.connect(self._log)
         self._worker.progress.connect(self._on_progress)

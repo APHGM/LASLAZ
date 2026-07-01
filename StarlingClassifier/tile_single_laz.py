@@ -21,5 +21,8 @@ if __name__ == "__main__":
     ap.add_argument("--tile", type=float, default=100.0, help="Tile size m")
     ap.add_argument("--chunk", type=int, default=5_000_000,
                     help="Points per read chunk (lower = less RAM)")
+    ap.add_argument("--no-dxf", action="store_true",
+                    help="Skip writing the tile-boundary DXF after tiling")
     args = ap.parse_args()
-    tile_file(args.input, args.out_dir, args.tile, args.chunk)
+    tile_file(args.input, args.out_dir, args.tile, args.chunk,
+              write_boundary_dxf=not args.no_dxf)

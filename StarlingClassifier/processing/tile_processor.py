@@ -60,6 +60,10 @@ class ProcessParams:
     modelkey_step_m: float = 8.0
     # Parallelism: 1 = sequential, N = ProcessPoolExecutor with N workers
     num_workers: int = 1
+    # Post-processing: merge all *_classified.laz output tiles into ONE final LAZ
+    merge_output_to_single: bool = True
+    # Custom name for the merged output (blank = auto based on input)
+    merged_output_name: str = ""
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -237,9 +241,14 @@ def _process_one_tile(job: dict) -> dict:
             ground_mask = ground_mask_all[:n_core]
             nz = nz_all[:n_core]
     except Exception as e:
-        log(f"  ERROR in ground classification: {e}")
+        err_kind = type(e).__name__
+        err_msg = str(e) or "(no message — likely out of memory or native crash)"
+        log(f"  ERROR in ground classification: {err_kind}: {err_msg}")
+        if "memory" in err_kind.lower() or "MemoryError" in err_kind:
+            log("  ↳ Out of RAM. Re-run with 'Skip tiling' UNCHECKED to tile first, "
+                "or tile manually and re-process as Tile folder.")
         result["status"] = "SKIPPED"
-        result["reason"] = f"Ground classification error: {e}"
+        result["reason"] = f"Ground classification error: {err_kind}: {err_msg}"
         return result
 
     nz_finite = nz[np.isfinite(nz)]
@@ -434,13 +443,78 @@ def process_single_file(
     if not file_path.exists():
         raise FileNotFoundError(file_path)
 
-    log_fn(f"Single-file mode (no tiling): {file_path.name}")
+    log_fn(f"Single-file mode requested: {file_path.name}")
+    pt_count = 0
     try:
         import laspy
         with laspy.open(str(file_path)) as r:
-            log_fn(f"  Point count: {r.header.point_count:,}")
+            pt_count = r.header.point_count
+            log_fn(f"  Point count: {pt_count:,}")
     except Exception:
         pass
+
+    # ── RAM pre-flight check + AUTO-FALLBACK to tiling ──────────────────
+    # Rough peak need: ~80 bytes/point (xyz float64 + working arrays + CSF + DBSCAN)
+    auto_tile = False
+    if pt_count > 0:
+        est_gb = (pt_count * 80) / (1024 ** 3)
+        try:
+            import psutil
+            avail_gb = psutil.virtual_memory().available / (1024 ** 3)
+            log_fn(f"  Estimated RAM need: ~{est_gb:.1f} GB  |  Available: {avail_gb:.1f} GB")
+            if est_gb > avail_gb * 0.8:
+                auto_tile = True
+        except ImportError:
+            log_fn(f"  Estimated RAM need: ~{est_gb:.1f} GB")
+            if est_gb > 50:   # conservative without psutil
+                auto_tile = True
+
+    # ── Auto-fallback: tile first, then process tiles ────────────────────
+    if auto_tile:
+        log_fn("")
+        log_fn("  ⚠ File too large for single-pass processing — auto-tiling first.")
+        # Choose tile size based on point density:
+        # target ~20-40 M pts per tile so each fits comfortably
+        target_pts_per_tile = 30_000_000
+        try:
+            import laspy as _lp, math
+            with _lp.open(str(file_path)) as r:
+                h = r.header
+                area_m2 = max(1.0, (h.maxs[0] - h.mins[0]) * (h.maxs[1] - h.mins[1]))
+            density = pt_count / area_m2                  # pts per m²
+            tile_area = target_pts_per_tile / max(density, 1.0)
+            tile_size = max(25.0, min(200.0, round(math.sqrt(tile_area) / 5) * 5))
+        except Exception:
+            tile_size = 100.0
+
+        log_fn(f"  Auto-tile size: {tile_size:.0f} m")
+        from .tiler import tile_file as _tile_file
+        tile_dir = file_path.parent / f"Tile_{file_path.stem}_auto"
+        _tile_file(
+            in_path=str(file_path),
+            out_dir=str(tile_dir),
+            tile_size=tile_size,
+            log_fn=log_fn,
+            progress_fn=progress_fn,
+            cancelled_fn=cancelled_fn,
+            write_boundary_dxf=True,
+        )
+        if cancelled_fn():
+            log_fn("Cancelled during auto-tiling.")
+            return out_dir / "bird_contacts.csv"
+        log_fn("\n  Auto-tiling complete — running full tile pipeline...\n")
+        # Set merged output name to match source filename so user gets
+        # <input_stem>_classified.laz at the end
+        if not params.merged_output_name.strip():
+            params.merged_output_name = f"{file_path.stem}_classified.laz"
+        return process_all_tiles(
+            tile_dir=tile_dir,
+            out_dir=out_dir,
+            params=params,
+            log_fn=log_fn,
+            progress_fn=progress_fn,
+            cancelled_fn=cancelled_fn,
+        )
 
     job = {
         "tile_path": str(file_path),
@@ -629,4 +703,36 @@ def process_all_tiles(
         log_fn("No bird contacts found across all tiles.")
 
     _write_tile_summary(tile_results, out_dir, log_fn, tile_dir)
+
+    # ── Optional: merge classified tiles into ONE single LAZ ──────────────
+    if params.merge_output_to_single:
+        classified = sorted(Path(out_dir).glob("*_classified.la[sz]"))
+        if len(classified) >= 1:
+            from .tiler import merge_las_files as _merge
+            src_stem = Path(tile_dir).name
+            name = params.merged_output_name.strip() or f"{src_stem}_classified.laz"
+            merged_out = Path(out_dir) / name
+            log_fn(f"\nMerging {len(classified)} classified tiles → {merged_out.name}")
+            try:
+                _merge(
+                    in_paths=classified,
+                    out_path=merged_out,
+                    log_fn=log_fn,
+                    progress_fn=progress_fn,
+                    cancelled_fn=cancelled_fn,
+                )
+                shards_dir = Path(out_dir) / f"_shards_{src_stem}"
+                shards_dir.mkdir(exist_ok=True)
+                moved = 0
+                for t in classified:
+                    try:
+                        t.rename(shards_dir / t.name)
+                        moved += 1
+                    except Exception:
+                        pass
+                log_fn(f"  Moved {moved} shard tiles to: {shards_dir}")
+                log_fn(f"  FINAL SINGLE OUTPUT: {merged_out}")
+            except Exception as e:
+                log_fn(f"  WARNING: could not merge output tiles: {e}")
+
     return csv_path
