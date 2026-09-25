@@ -1,0 +1,9 @@
+PyQt6
+laspy[lazrs]
+numpy
+scipy
+scikit-learn
+opencv-python
+shapely
+ezdxf
+psutil
