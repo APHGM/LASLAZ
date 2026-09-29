@@ -317,7 +317,7 @@ class BatchWorkerThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Starling Ground-Contact Classifier  —  V03 (WIP)")
+        self.setWindowTitle("Starling Ground-Contact Classifier  —  V04 (WIP)")
         self.setMinimumSize(560, 380)
         # Size to screen — leave 60 px margin on each axis for taskbars/titlebars
         from PyQt6.QtWidgets import QApplication
@@ -437,7 +437,11 @@ class MainWindow(QMainWindow):
         self.pcs_combo.addItem(
             "Auto-detect  (from intensity / NIR / RGB signals)", "auto"
         )
-        self.pcs_combo.addItem("LiDAR / mobile scan", "lidar")
+        self.pcs_combo.addItem("LiDAR / outdoor scan", "lidar")
+        self.pcs_combo.addItem(
+            "SLAM / indoor-outdoor scan  (coarse cloth + z_grid smooth)",
+            "slam"
+        )
         self.pcs_combo.addItem(
             "Drone photogrammetry  (NDVI / VARI + building detection)",
             "photogrammetry"
@@ -445,7 +449,9 @@ class MainWindow(QMainWindow):
         self.pcs_combo.setToolTip(
             "Auto-detect: reads intensity / NIR / RGB and picks LiDAR or\n"
             "Photogrammetry automatically per source file.\n\n"
-            "LiDAR: CSF + multi-return-friendly bird detection.\n"
+            "LiDAR: tight CSF (cloth 0.30 m, threshold ±5 cm) + bird detection.\n\n"
+            "SLAM: coarser cloth (0.50 m, threshold ±20 cm) + median smoothing of\n"
+            "the ground raster — handles wall-only areas where no floor was scanned.\n\n"
             "Photogrammetry: RGB/NIR vegetation index + building detection via\n"
             "plane RANSAC; bird detection auto-disabled (SfM birds are unreliable)."
         )
@@ -717,6 +723,7 @@ class MainWindow(QMainWindow):
         """Toggle sections and apply safe defaults based on the chosen source."""
         current = self.pcs_combo.currentData()
         photo = (current == "photogrammetry")
+        slam  = (current == "slam")
         auto  = (current == "auto")
 
         # Photogrammetry panel: visible when photo is explicitly chosen,
@@ -724,7 +731,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_sec_photo"):
             self._sec_photo.setVisible(photo or auto)
 
-        # Bird detection: greyed only when photo is explicitly chosen
+        # Bird detection: greyed in photo mode; SLAM still runs bird detection
         if hasattr(self, "_sec_bird"):
             self._sec_bird.setEnabled(not photo)
             if photo:
@@ -735,7 +742,7 @@ class MainWindow(QMainWindow):
                 title = "Bird Contact Detection"
             self._sec_bird.toggle_btn.setText(title)
 
-        # Auto-apply defaults only for explicit LiDAR / photogrammetry —
+        # Auto-apply defaults only for explicit modes —
         # 'auto' leaves user's settings alone until runtime detection resolves.
         if photo:
             if hasattr(self, "workers_spin"):
@@ -749,6 +756,12 @@ class MainWindow(QMainWindow):
                 self._vari_thr.setValue(0.10)
             self._log("Drone photogrammetry defaults applied: "
                       "workers=2, index=VARI, VARI threshold=0.10")
+        elif slam:
+            # SLAM: single worker (streaming path is single-threaded), no veg index
+            if hasattr(self, "workers_spin"):
+                self.workers_spin.setValue(1)
+            self._log("SLAM defaults applied: cloth 0.50 m · threshold ±20 cm · "
+                      "z_grid median smooth (3-cell radius) · 1 worker")
         elif current == "lidar":
             if hasattr(self, "workers_spin"):
                 from processing.tile_processor import SYSTEM as _SYS
@@ -1084,7 +1097,7 @@ class MainWindow(QMainWindow):
         # ── Ground Classification ──────────────────────────────────────
         pcs = self.pcs_combo.currentData() if hasattr(self, "pcs_combo") else "lidar"
         src = self.ground_src_combo.currentData()
-        pcs_tag = " · Photo" if pcs == "photogrammetry" else " · LiDAR"
+        pcs_tag = " · Photo" if pcs == "photogrammetry" else (" · SLAM" if pcs == "slam" else " · LiDAR")
         if src == "from_file":
             self._sec_ground.set_status("Use existing class 2" + pcs_tag, "#fc8")
         else:
@@ -1097,6 +1110,8 @@ class MainWindow(QMainWindow):
                 idx = self.veg_index_combo.currentData().upper()
                 bldg = "Bldg ON" if self.building_chk.isChecked() else "Bldg OFF"
                 self._sec_photo.set_status(f"{idx} · {bldg}", "#8fc")
+            elif pcs == "slam":
+                self._sec_photo.set_status("(SLAM mode — cloth 0.50 m, ±20 cm ground, z_grid smooth)", "#8cf")
             else:
                 self._sec_photo.set_status("(LiDAR mode)", "#666")
 

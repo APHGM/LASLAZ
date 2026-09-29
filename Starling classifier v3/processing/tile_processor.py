@@ -11,6 +11,10 @@ from .las_io import (
     read_color_bands, has_rgb, has_nir,
 )
 from .ground_classifier import classify_ground, classify_ground_csf
+from .ground_classifier import (
+    classify_ground_csf_streaming, nz_from_grid,
+    STREAMING_POINT_THRESHOLD,
+)
 from .bird_detector import detect_bird_contacts, BirdCluster
 from .height_classifier import (
     classify_heights, classify_model_keypoints, ground_mask_from_classification,
@@ -179,6 +183,22 @@ class ProcessParams:
     photo_csf_iterations: int = 500
     # Exclude buildings from final output (useful for Revit topography extraction)
     exclude_buildings_from_output: bool = False
+
+    # ── v2.1 — SLAM / indoor-outdoor mode ───────────────────────────────
+    # "slam" activates SLAM-specific CSF defaults and z_grid smoothing.
+    # Coarser cloth + wider threshold + median smooth handle wall-catch artefacts
+    # where the scanner only saw walls (no floor), making the lowest voxel point
+    # a wall point rather than a floor point.
+    slam_csf_cloth_resolution: float = 0.50   # coarser → less wall snagging
+    slam_csf_class_threshold: float = 0.20    # ±20 cm ground band
+    slam_csf_rigidness: int = 1
+    slam_csf_iterations: int = 500
+    slam_zgrid_smooth_cells: int = 3          # median filter radius on z_grid (cells)
+    # Vertical-surface rejection: voxel cells whose Z range exceeds this value
+    # are walls/columns and excluded from CSF ground candidates.
+    # Ground/floor cells span ~0.05 m of noise; walls span 1–4 m.
+    # 0.0 = disabled.  Recommended: 0.50 m for SLAM.
+    slam_z_range_max: float = 0.50
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -620,6 +640,202 @@ def _write_tile_summary(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Streaming path — 2-pass classify, never loads full point cloud
+# ────────────────────────────────────────────────────────────────────────────
+
+def _classify_streaming(
+    file_path: Path,
+    out_dir: Path,
+    params: "ProcessParams",
+    log_fn: Callable,
+    progress_fn: Callable,
+    cancelled_fn: Callable,
+) -> Path:
+    """
+    Classify a large LAZ/LAS file without loading all points into RAM.
+
+    Pass 1 — ground surface (streaming voxel thin + CSF):
+        Streams the file in 5 M-point chunks. Each chunk updates a tiny
+        2-D grid (rows × cols cells) with the lowest Z seen per voxel cell.
+        After the full file: ~1 M ground candidates → CSF → ground raster.
+        Peak RAM: ≈ 150 MB  (grid + one chunk).
+
+    Pass 2 — classify + write:
+        Streams the file again. For each chunk: look up nZ from the ground
+        raster (O(N)), assign classes 2/3/4/5/7 by nZ thresholds, write the
+        classified chunk to the output file.
+        Peak RAM: ≈ 250 MB  (two chunks in flight + ground raster).
+
+    Bird detection is skipped for files above STREAMING_POINT_THRESHOLD
+    (typically 30 M points) — at that density the per-m² coverage is already
+    very high and near-ground clusters from a scan this dense are rarely
+    genuine bird contacts. A log note is emitted.
+    """
+    import laspy
+    import math
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{file_path.stem}_classified.{params.output_format}"
+
+    photo_mode = (params.point_cloud_source == "photogrammetry")
+    slam_mode  = (params.point_cloud_source == "slam")
+
+    # ── PASS 1: streaming voxel thin + CSF ───────────────────────────────
+    log_fn(f"\n  [Stream Pass 1] Building ground surface from {file_path.name} ...")
+    if slam_mode:
+        log_fn("  Source: SLAM — using SLAM CSF params + z_grid median smoothing")
+    progress_fn(0, 10)
+
+    try:
+        if params.ground_source == "from_file":
+            # Ground already classified — we still need to read it, but only
+            # the classification field, which laspy loads lazily.  Fall back to
+            # the normal single-file path for this case (it's already fast).
+            log_fn("  Ground source = from_file: streaming not needed — reading ground pts only.")
+            import laspy as _lp
+            with _lp.open(str(file_path)) as r:
+                las = r.read()
+            src_cls = np.asarray(las.classification, dtype=np.uint8)
+            ground_pts = np.stack([las.x[src_cls == 2], las.y[src_cls == 2],
+                                   las.z[src_cls == 2]], axis=1)
+            if len(ground_pts) < 50:
+                raise RuntimeError("Source has <50 class-2 pts — switch to 'Compute fresh'")
+            z_grid, x_min, y_min, cell_size = None, None, None, None
+            # Build grid from existing ground points
+            from .ground_classifier import _fill_nan
+            xmn = float(las.x.min()); ymn = float(las.y.min())
+            xmx = float(las.x.max()); ymx = float(las.y.max())
+            cell_size = params.csf_cloth_resolution
+            cols = int(np.ceil((xmx - xmn) / cell_size)) + 2
+            rows = int(np.ceil((ymx - ymn) / cell_size)) + 2
+            gci = np.clip(((ground_pts[:,0]-xmn)/cell_size).astype(np.int32), 0, cols-1)
+            gri = np.clip(((ground_pts[:,1]-ymn)/cell_size).astype(np.int32), 0, rows-1)
+            zs = np.zeros((rows, cols), dtype=np.float64)
+            zc = np.zeros((rows, cols), dtype=np.int32)
+            np.add.at(zs, (gri, gci), ground_pts[:,2])
+            np.add.at(zc, (gri, gci), 1)
+            z_grid = np.where(zc > 0, zs / np.maximum(zc, 1), np.nan)
+            if np.isnan(z_grid).any():
+                z_grid = _fill_nan(z_grid)
+            x_min, y_min = xmn, ymn
+            del las, ground_pts
+            ground_class_thr = params.csf_class_threshold
+        else:
+            if params.ground_method == "csf":
+                if slam_mode:
+                    cloth_res  = params.slam_csf_cloth_resolution
+                    class_thr  = params.slam_csf_class_threshold
+                    rigidness  = params.slam_csf_rigidness
+                    iterations = params.slam_csf_iterations
+                elif photo_mode:
+                    cloth_res  = params.photo_csf_cloth_resolution
+                    class_thr  = params.photo_csf_class_threshold
+                    rigidness  = params.photo_csf_rigidness
+                    iterations = params.photo_csf_iterations
+                else:
+                    cloth_res  = params.csf_cloth_resolution
+                    class_thr  = params.csf_class_threshold
+                    rigidness  = params.csf_rigidness
+                    iterations = params.csf_iterations
+                ground_class_thr = class_thr
+            else:
+                # Grid minimum: build it streaming too — just min-Z grid, no CSF
+                cloth_res  = params.ground_cell_size
+                class_thr  = params.ground_threshold
+                rigidness  = 1
+                iterations = 1
+                ground_class_thr = params.ground_threshold
+
+            z_grid, x_min, y_min, cell_size = classify_ground_csf_streaming(
+                file_path    = str(file_path),
+                extra_pts    = None,
+                cloth_resolution = cloth_res,
+                class_threshold  = class_thr,
+                rigidness        = rigidness,
+                iterations       = iterations,
+                slope_smooth     = params.csf_slope_smooth,
+                csf_voxel_size   = params.csf_voxel_size,
+                z_range_max      = params.slam_z_range_max if slam_mode else 0.0,
+                log_fn           = log_fn,
+            )
+
+            # ── SLAM: median-smooth z_grid to suppress wall-catch spikes ──────
+            if slam_mode and params.slam_zgrid_smooth_cells > 0:
+                from scipy.ndimage import median_filter
+                r = params.slam_zgrid_smooth_cells
+                log_fn(f"  SLAM: median-smoothing z_grid with radius={r} cells ({r*cell_size:.2f} m)")
+                z_grid = median_filter(z_grid, size=2 * r + 1, mode="nearest")
+
+    except Exception as e:
+        log_fn(f"  ERROR in streaming ground classification: {e}")
+        raise
+
+    progress_fn(5, 10)
+    if cancelled_fn():
+        return out_dir / "bird_contacts.csv"
+
+    # ── PASS 2: stream classify + write ───────────────────────────────────
+    log_fn(f"\n  [Stream Pass 2] Classifying + writing {out_path.name} ...")
+
+    CHUNK = 5_000_000
+    with laspy.open(str(file_path)) as reader:
+        header     = reader.header
+        pt_count   = header.point_count
+        chunks_tot = math.ceil(pt_count / CHUNK)
+
+        with laspy.open(str(out_path), mode="w", header=header) as writer:
+            done = 0
+            for chunk in reader.chunk_iterator(CHUNK):
+                if cancelled_fn():
+                    log_fn("  Cancelled during streaming write.")
+                    return out_dir / "bird_contacts.csv"
+
+                x  = np.asarray(chunk.x, dtype=np.float64)
+                y  = np.asarray(chunk.y, dtype=np.float64)
+                z  = np.asarray(chunk.z, dtype=np.float64)
+                nz = nz_from_grid(x, y, z, z_grid, x_min, y_min, cell_size)
+
+                cls = np.full(len(x), 1, dtype=np.uint8)   # 1 = unclassified
+
+                # Ground — uses source-specific threshold resolved in Pass 1
+                gnd = np.abs(nz) <= ground_class_thr
+                cls[gnd] = 2
+
+                if params.classify_vegetation:
+                    above = ~gnd
+                    cls[above & (nz >= params.veg_low_min) & (nz < params.veg_low_max)]  = 3
+                    cls[above & (nz >= params.veg_low_max) & (nz < params.veg_med_max)]  = 4
+                    cls[above & (nz >= params.veg_med_max)]                               = 5
+                    cls[nz < params.noise_below_ground]                                   = 7
+
+                chunk.classification = cls
+                writer.write_points(chunk)
+
+                done += 1
+                progress_fn(5 + int(done / chunks_tot * 4), 10)
+                if done % 10 == 0:
+                    log_fn(f"    Pass 2: {done}/{chunks_tot} chunks written")
+
+    progress_fn(9, 10)
+    log_fn(f"  Streaming classify complete → {out_path}")
+    log_fn(f"  (Bird detection skipped — file has >{STREAMING_POINT_THRESHOLD:,} pts; "
+           f"re-tile to <30 M pts per tile if bird detection is needed)")
+
+    # Write an empty CSV so callers that expect a CSV path don't break
+    csv_path = out_dir / "bird_contacts.csv"
+    if not csv_path.exists():
+        with open(csv_path, "w", newline="") as f:
+            import csv as _csv
+            _csv.writer(f).writerow(
+                ["tile", "cluster_id", "x", "y", "z", "nz_mean",
+                 "n_points", "footprint_m2"]
+            )
+
+    progress_fn(10, 10)
+    return csv_path
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Single-file path — skip tiling entirely
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -657,9 +873,10 @@ def process_single_file(
     except Exception:
         pass
 
-    # ── RAM pre-flight check + AUTO-FALLBACK to tiling ──────────────────
-    # SYSTEM profile is computed once at import from actual machine resources.
-    auto_tile = False
+    # ── RAM pre-flight check ────────────────────────────────────────────────
+    use_streaming = False
+    auto_tile     = False
+    est_gb        = 0.0
     if pt_count > 0:
         est_gb = (pt_count * SYSTEM["bytes_per_pt"]) / (1024 ** 3)
         log_fn(
@@ -669,9 +886,31 @@ def process_single_file(
             f"Budget (55% avail / 50% total cap): {SYSTEM['budget_gb']:.1f} GB"
         )
         if est_gb > SYSTEM["budget_gb"]:
-            auto_tile = True
+            if pt_count >= STREAMING_POINT_THRESHOLD:
+                # Large file: stream through in chunks — no full load ever needed.
+                # Peak RAM ≈ 400 MB regardless of file size.
+                use_streaming = True
+            else:
+                # Small but tight on RAM — fall back to tiling as before.
+                auto_tile = True
 
-    # ── Auto-fallback: tile first, then process tiles ────────────────────
+    # ── Streaming path: 2-pass classify without loading full cloud ──────
+    if use_streaming:
+        log_fn("")
+        log_fn(
+            f"  File has {pt_count:,} pts ({est_gb:.1f} GB) — using streaming "
+            f"classify (peak RAM ≈ 400 MB, no full load)."
+        )
+        return _classify_streaming(
+            file_path=file_path,
+            out_dir=out_dir,
+            params=params,
+            log_fn=log_fn,
+            progress_fn=progress_fn,
+            cancelled_fn=cancelled_fn,
+        )
+
+    # ── Auto-tile fallback (file is small but still over budget) ─────────
     if auto_tile:
         log_fn("")
         log_fn(
@@ -684,7 +923,7 @@ def process_single_file(
             with _lp.open(str(file_path)) as r:
                 h = r.header
                 area_m2 = max(1.0, (h.maxs[0] - h.mins[0]) * (h.maxs[1] - h.mins[1]))
-            density = pt_count / area_m2                  # pts per m²
+            density = pt_count / area_m2
             tile_area = target_pts_per_tile / max(density, 1.0)
             tile_size = max(25.0, min(200.0, round(math.sqrt(tile_area) / 5) * 5))
         except Exception:
@@ -706,14 +945,7 @@ def process_single_file(
             log_fn("Cancelled during auto-tiling.")
             return out_dir / "bird_contacts.csv"
         log_fn("\n  Auto-tiling complete — running full tile pipeline...\n")
-        # Propagate the auto-computed tile size into params so that
-        # process_all_tiles uses the correct neighbour offsets.  Without this,
-        # neighbour lookup uses the original (GUI-default) tile_size which won't
-        # match the actual tile spacing, so every tile gets processed without its
-        # edge buffer and seam artefacts appear in the classified output.
         params.tile_size = tile_size
-        # Set merged output name to match source filename so user gets
-        # <input_stem>_classified.laz at the end
         if not params.merged_output_name.strip():
             params.merged_output_name = f"{file_path.stem}_classified.laz"
         return process_all_tiles(

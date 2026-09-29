@@ -1,0 +1,3 @@
+[Error contacting local Ollama server: HTTP Error 404: Not Found]
+
+Make sure Ollama is installed and running, and that you've pulled the model with: ollama pull llama3.1:8b
