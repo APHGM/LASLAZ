@@ -885,21 +885,22 @@ def process_single_file(
             f"Available: {SYSTEM['avail_gb']:.1f} GB  |  "
             f"Budget (55% avail / 50% total cap): {SYSTEM['budget_gb']:.1f} GB"
         )
-        if est_gb > SYSTEM["budget_gb"]:
-            if pt_count >= STREAMING_POINT_THRESHOLD:
-                # Large file: stream through in chunks — no full load ever needed.
-                # Peak RAM ≈ 400 MB regardless of file size.
-                use_streaming = True
-            else:
-                # Small but tight on RAM — fall back to tiling as before.
-                auto_tile = True
+        if pt_count >= STREAMING_POINT_THRESHOLD:
+            # Any file ≥ 30M points always uses streaming regardless of RAM
+            # estimate. Windows "Available" includes standby/cached pages that
+            # aren't instantly free, making the estimate unreliable for large
+            # files. Streaming peak RAM ≈ 400 MB regardless of file size.
+            use_streaming = True
+        elif est_gb > SYSTEM["budget_gb"]:
+            # Smaller file but still over budget — fall back to tiling.
+            auto_tile = True
 
     # ── Streaming path: 2-pass classify without loading full cloud ──────
     if use_streaming:
         log_fn("")
         log_fn(
-            f"  File has {pt_count:,} pts ({est_gb:.1f} GB) — using streaming "
-            f"classify (peak RAM ≈ 400 MB, no full load)."
+            f"  File has {pt_count:,} pts — using streaming classify "
+            f"(≥{STREAMING_POINT_THRESHOLD:,} pt threshold; peak RAM ≈ 400 MB)."
         )
         return _classify_streaming(
             file_path=file_path,
