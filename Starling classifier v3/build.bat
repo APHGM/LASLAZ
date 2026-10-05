@@ -42,6 +42,6 @@ if errorlevel 1 (
 echo.
 echo ============================================================
 echo BUILD COMPLETE.
-echo Output: %APP%dist\StarlingClassifier_v4\StarlingClassifier_v4.exe
+echo Output: %APP%dist\StarlingClassifier_v4\StarlingClassifier_v4.1.exe
 echo ============================================================
 pause

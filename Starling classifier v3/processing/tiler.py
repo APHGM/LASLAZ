@@ -189,7 +189,9 @@ def tile_file(
 
     if write_boundary_dxf and len(writers) > 0:
         try:
-            write_tile_boundaries_dxf(out_dir, log_fn=log_fn)
+            # Write DXF alongside the output tiles (out_dir), not the source folder
+            dxf_path = out_dir / f"{out_dir.name}_boundaries.dxf"
+            write_tile_boundaries_dxf(out_dir, out_path=dxf_path, log_fn=log_fn)
         except Exception as e:
             log_fn(f"  WARNING: boundary DXF generation failed: {e}")
 

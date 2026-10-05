@@ -168,7 +168,21 @@ class WorkerThread(QThread):
 
             # ── Single file ───────────────────────────────────────────────
             if self.mode == "file":
-                csv_path = self._process_single_or_tile(self.source)
+                source = self.source
+                # E57 → LAZ conversion before any processing
+                if Path(source).suffix.lower() == ".e57":
+                    try:
+                        from processing.las_io import convert_e57_to_laz
+                        laz_out = Path(self.out_dir) / (Path(source).stem + "_converted.laz")
+                        source = str(convert_e57_to_laz(
+                            source, out_path=laz_out, log_fn=self.log.emit
+                        ))
+                        self.log.emit(f"E57 converted → {laz_out.name}")
+                    except Exception as e:
+                        self.log.emit(f"ERROR converting E57: {e}")
+                        self.finished.emit("")
+                        return
+                csv_path = self._process_single_or_tile(source)
                 self.finished.emit(str(csv_path) if csv_path else "")
                 return
 
@@ -317,7 +331,7 @@ class BatchWorkerThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Starling Ground-Contact Classifier  —  V04 (WIP)")
+        self.setWindowTitle("Starling Ground-Contact Classifier  —  V04.1 (WIP)")
         self.setMinimumSize(560, 380)
         # Size to screen — leave 60 px margin on each axis for taskbars/titlebars
         from PyQt6.QtWidgets import QApplication
@@ -976,8 +990,8 @@ class MainWindow(QMainWindow):
 
     def _browse_file(self):
         f, _ = QFileDialog.getOpenFileName(
-            self, "Select LAZ file", "",
-            "LAS/LAZ files (*.laz *.las);;All files (*.*)"
+            self, "Select point cloud file", "",
+            "Point cloud files (*.laz *.las *.e57);;LAS/LAZ (*.laz *.las);;E57 (*.e57);;All files (*.*)"
         )
         if f:
             self.file_edit.setText(f)
