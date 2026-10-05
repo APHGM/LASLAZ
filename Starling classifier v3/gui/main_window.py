@@ -62,6 +62,15 @@ class WorkerThread(QThread):
         Modifies self.params.point_cloud_source and self.tile_size in place.
         No-op when the user has explicitly set them.
         """
+        # E57 files are already converted to LAZ before this is called,
+        # but guard defensively — laspy cannot read E57 directly.
+        if Path(file_path).suffix.lower() == ".e57":
+            if self.params.point_cloud_source == "auto":
+                self.params.point_cloud_source = "lidar"
+            if self.tile_size == 0:
+                self.tile_size = 100.0
+            return
+
         # ── Point cloud source ──
         if self.params.point_cloud_source == "auto":
             try:
@@ -169,17 +178,33 @@ class WorkerThread(QThread):
             # ── Single file ───────────────────────────────────────────────
             if self.mode == "file":
                 source = self.source
-                # E57 → LAZ conversion before any processing
+                # E57 → LAZ conversion before any processing (subprocess-isolated)
                 if Path(source).suffix.lower() == ".e57":
+                    import sys as _sys, subprocess as _sub
+                    laz_out = Path(self.out_dir) / (Path(source).stem + "_converted.laz")
+                    self.log.emit(f"Converting E57 → LAZ: {Path(source).name}")
+                    script = Path(__file__).parent.parent / "convert_e57.py"
+                    args = [_sys.executable, str(script), source,
+                            "--out", str(Path(self.out_dir))]
                     try:
-                        from processing.las_io import convert_e57_to_laz
-                        laz_out = Path(self.out_dir) / (Path(source).stem + "_converted.laz")
-                        source = str(convert_e57_to_laz(
-                            source, out_path=laz_out, log_fn=self.log.emit
-                        ))
+                        proc = _sub.Popen(
+                            args, stdout=_sub.PIPE, stderr=_sub.STDOUT,
+                            text=True, encoding="utf-8", errors="replace",
+                        )
+                        for line in proc.stdout:
+                            self.log.emit(line.rstrip())
+                        proc.wait()
+                        if proc.returncode != 0:
+                            self.log.emit(
+                                f"ERROR: E57 conversion failed (exit {proc.returncode})."
+                                " The file may be unsupported or corrupted."
+                            )
+                            self.finished.emit("")
+                            return
+                        source = str(laz_out)
                         self.log.emit(f"E57 converted → {laz_out.name}")
                     except Exception as e:
-                        self.log.emit(f"ERROR converting E57: {e}")
+                        self.log.emit(f"ERROR launching E57 converter: {e}")
                         self.finished.emit("")
                         return
                 csv_path = self._process_single_or_tile(source)
@@ -209,6 +234,82 @@ class WorkerThread(QThread):
         except Exception as e:
             self.log.emit(f"FATAL ERROR: {e}")
             self.finished.emit("")
+
+
+class E57WorkerThread(QThread):
+    """Convert a list of E57 files to LAZ sequentially."""
+    log       = pyqtSignal(str)
+    file_done = pyqtSignal(int, bool, str)   # (index, ok, message)
+    finished  = pyqtSignal(int, int)          # (n_ok, n_fail)
+
+    def __init__(self, files: list, out_dir: str | None):
+        super().__init__()
+        self._files   = list(files)
+        self._out_dir = out_dir
+        self._cancel  = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        import sys, subprocess
+        from pathlib import Path as _Path
+
+        script = _Path(__file__).parent.parent / "convert_e57.py"
+        python = sys.executable
+        n_ok = n_fail = 0
+
+        for i, f in enumerate(self._files):
+            if self._cancel:
+                self.log.emit("E57 conversion cancelled.")
+                break
+            self.log.emit(f"\n[{i+1}/{len(self._files)}] {f.name}")
+            try:
+                out_dir = _Path(self._out_dir) if self._out_dir else f.parent
+                laz_path = out_dir / (f.stem + ".laz")
+                if laz_path.exists():
+                    self.log.emit(f"  SKIP (already exists): {laz_path.name}")
+                    self.file_done.emit(i, True, "skipped")
+                    n_ok += 1
+                    continue
+
+                args = [python, str(script), str(f)]
+                if self._out_dir:
+                    args += ["--out", str(self._out_dir)]
+
+                proc = subprocess.Popen(
+                    args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                )
+                while True:
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    self.log.emit(line.rstrip())
+                    if self._cancel:
+                        proc.terminate()
+                        proc.wait()
+                        break
+                proc.wait()
+
+                if proc.returncode == 0:
+                    self.file_done.emit(i, True, "")
+                    n_ok += 1
+                else:
+                    msg = f"Process exited with code {proc.returncode} (possible segfault or bad E57)"
+                    self.log.emit(f"  ERROR: {msg}")
+                    self.file_done.emit(i, False, msg)
+                    n_fail += 1
+
+            except Exception as e:
+                import traceback
+                msg = str(e)
+                self.log.emit(f"  ERROR: {msg}")
+                self.log.emit(traceback.format_exc())
+                self.file_done.emit(i, False, msg)
+                n_fail += 1
+
+        self.finished.emit(n_ok, n_fail)
 
 
 class BatchWorkerThread(QThread):
@@ -406,6 +507,7 @@ class MainWindow(QMainWindow):
         self._main_tabs = QTabWidget()
         self._main_tabs.addTab(scroll, "Classify")
         self._main_tabs.addTab(self._build_batch_tab(), "Batch Process")
+        self._main_tabs.addTab(self._build_e57_tab(), "E57 → LAZ")
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(self._main_tabs)
@@ -1172,7 +1274,11 @@ class MainWindow(QMainWindow):
         elif mode == "file":
             source = self.file_edit.text().strip()
             if not source or not Path(source).is_file():
-                self._log("ERROR: Select a valid LAZ file.")
+                self._log("ERROR: Select a valid point cloud file (LAZ / LAS / E57).")
+                return
+            if Path(source).suffix.lower() not in (".laz", ".las", ".e57"):
+                self._log(f"ERROR: Unsupported file type '{Path(source).suffix}'. "
+                          "Use LAZ, LAS, or E57.")
                 return
             tile_size = self.tile_size_spin.value()
             skip_tiling = self.skip_tile_chk.isChecked()
@@ -1471,3 +1577,142 @@ class MainWindow(QMainWindow):
             f"\nBatch complete: {n_ok}/{total} succeeded"
             + (f", {n_fail} failed." if n_fail else ".")
         )
+
+    # ── E57 → LAZ tab ─────────────────────────────────────────────────────
+
+    def _build_e57_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+
+        lay.addWidget(QLabel(
+            "<b>E57 → LAZ Converter</b>  (Recap / Faro / Leica exports)<br>"
+            "Converts all E57 files in a folder to LAZ alongside each file.<br>"
+            "All scans inside one E57 are merged into a single LAZ."
+        ))
+
+        # Input folder
+        in_row = QHBoxLayout()
+        self._e57_folder_edit = QLineEdit()
+        self._e57_folder_edit.setPlaceholderText("Folder containing *.e57 files")
+        btn_in = QPushButton("Browse…")
+        btn_in.clicked.connect(self._e57_browse_folder)
+        in_row.addWidget(QLabel("Input folder:"))
+        in_row.addWidget(self._e57_folder_edit, stretch=1)
+        in_row.addWidget(btn_in)
+        lay.addLayout(in_row)
+
+        # Output folder
+        out_row = QHBoxLayout()
+        self._e57_out_edit = QLineEdit()
+        self._e57_out_edit.setPlaceholderText("Same as input folder (default)")
+        btn_out = QPushButton("Browse…")
+        btn_out.clicked.connect(self._e57_browse_out)
+        out_row.addWidget(QLabel("Output folder:"))
+        out_row.addWidget(self._e57_out_edit, stretch=1)
+        out_row.addWidget(btn_out)
+        lay.addLayout(out_row)
+
+        # Recursive checkbox
+        self._e57_recursive_chk = QCheckBox("Include subfolders")
+        lay.addWidget(self._e57_recursive_chk)
+
+        # File list
+        self._e57_table = QTableWidget(0, 3)
+        self._e57_table.setHorizontalHeaderLabels(["Filename", "Size", "Status"])
+        self._e57_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._e57_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._e57_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._e57_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._e57_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        lay.addWidget(self._e57_table, stretch=1)
+
+        # Progress
+        self._e57_progress = QProgressBar()
+        self._e57_progress.setTextVisible(True)
+        lay.addWidget(self._e57_progress)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        self._e57_scan_btn  = QPushButton("Scan folder")
+        self._e57_start_btn = QPushButton("Convert All")
+        self._e57_cancel_btn = QPushButton("Cancel")
+        self._e57_start_btn.setEnabled(False)
+        self._e57_cancel_btn.setEnabled(False)
+        self._e57_scan_btn.clicked.connect(self._e57_scan)
+        self._e57_start_btn.clicked.connect(self._e57_start)
+        self._e57_cancel_btn.clicked.connect(self._e57_cancel)
+        btn_row.addWidget(self._e57_scan_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(self._e57_start_btn)
+        btn_row.addWidget(self._e57_cancel_btn)
+        lay.addLayout(btn_row)
+
+        self._e57_files: list[Path] = []
+        self._e57_worker: "E57WorkerThread | None" = None
+        return w
+
+    def _e57_browse_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "Select folder with E57 files")
+        if d:
+            self._e57_folder_edit.setText(d)
+
+    def _e57_browse_out(self):
+        d = QFileDialog.getExistingDirectory(self, "Select output folder")
+        if d:
+            self._e57_out_edit.setText(d)
+
+    def _e57_scan(self):
+        folder = self._e57_folder_edit.text().strip()
+        if not folder or not Path(folder).is_dir():
+            self._log("E57: select a valid input folder first.")
+            return
+        recursive = self._e57_recursive_chk.isChecked()
+        pattern = "**/*.e57" if recursive else "*.e57"
+        self._e57_files = sorted(Path(folder).glob(pattern))
+        self._e57_table.setRowCount(0)
+        for i, f in enumerate(self._e57_files):
+            self._e57_table.insertRow(i)
+            self._e57_table.setItem(i, 0, QTableWidgetItem(f.name))
+            mb = f.stat().st_size / 1e6
+            self._e57_table.setItem(i, 1, QTableWidgetItem(f"{mb:.0f} MB"))
+            self._e57_table.setItem(i, 2, QTableWidgetItem("Pending"))
+        self._e57_start_btn.setEnabled(bool(self._e57_files))
+        self._log(f"E57: found {len(self._e57_files)} file(s).")
+
+    def _e57_start(self):
+        if not self._e57_files:
+            return
+        out_dir = self._e57_out_edit.text().strip() or None
+        self._e57_start_btn.setEnabled(False)
+        self._e57_cancel_btn.setEnabled(True)
+        self._e57_progress.setValue(0)
+        self._e57_progress.setMaximum(len(self._e57_files))
+
+        self._e57_worker = E57WorkerThread(self._e57_files, out_dir)
+        self._e57_worker.log.connect(self._log)
+        self._e57_worker.file_done.connect(self._e57_on_file_done)
+        self._e57_worker.finished.connect(self._e57_on_finished)
+        self._e57_worker.start()
+
+    def _e57_cancel(self):
+        if self._e57_worker:
+            self._e57_worker.cancel()
+        self._e57_cancel_btn.setEnabled(False)
+
+    def _e57_on_file_done(self, idx: int, ok: bool, msg: str):
+        self._e57_progress.setValue(idx + 1)
+        item = self._e57_table.item(idx, 2)
+        if item:
+            item.setText("OK" if ok else f"FAILED: {msg}")
+            item.setForeground(
+                __import__("PyQt6.QtGui", fromlist=["QColor"]).QColor(
+                    "#4f4" if ok else "#f44"
+                )
+            )
+
+    def _e57_on_finished(self, n_ok: int, n_fail: int):
+        self._e57_start_btn.setEnabled(True)
+        self._e57_cancel_btn.setEnabled(False)
+        self._log(f"\nE57 conversion: {n_ok} OK, {n_fail} failed.")

@@ -139,5 +139,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="StarlingClassifier_v3",
+    name="StarlingClassifier_v4.1",
 )
