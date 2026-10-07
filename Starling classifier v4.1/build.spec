@@ -43,6 +43,15 @@ hiddenimports += collect_submodules("processing")
 binaries = []
 datas = []
 
+# Bundle e572las.exe (LAStools free E57 converter) so the built EXE can
+# convert large E57 files without needing LAStools installed on the target PC.
+# e572las is a free tool from rapidlasso GmbH (https://rapidlasso.de/lastools/).
+# For internal/office distribution this is acceptable; confirm with legal before
+# distributing outside your organisation.
+_e572las_src = r"C:\LAStools\bin\e572las.EXE"
+if os.path.exists(_e572las_src):
+    binaries += [(_e572las_src, ".")]   # lands in root of dist folder beside StarlingClassifier_v4.2.exe
+
 # lazrs — Rust native extension; collect_all picks up the .pyd binary
 lazrs_datas, lazrs_bins, lazrs_hidden = collect_all("lazrs")
 datas    += lazrs_datas

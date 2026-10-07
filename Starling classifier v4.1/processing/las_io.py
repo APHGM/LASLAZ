@@ -336,10 +336,22 @@ _E572LAS_PATHS = [
 
 
 def _find_e572las() -> str | None:
-    import shutil
+    import sys, shutil
+    # When running as a PyInstaller bundle, check alongside the EXE first
+    if hasattr(sys, "_MEIPASS"):
+        bundled = Path(sys._MEIPASS) / "e572las.exe"
+        if bundled.exists():
+            return str(bundled)
+        # Also check next to the frozen executable itself
+        exe_dir = Path(sys.executable).parent
+        alongside = exe_dir / "e572las.exe"
+        if alongside.exists():
+            return str(alongside)
+    # System PATH
     found = shutil.which("e572las") or shutil.which("e572las.exe")
     if found:
         return found
+    # Common LAStools install locations
     for p in _E572LAS_PATHS:
         if Path(p).exists():
             return p
