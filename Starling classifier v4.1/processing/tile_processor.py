@@ -958,7 +958,7 @@ def process_single_file(
             log_fn=log_fn,
             progress_fn=progress_fn,
             cancelled_fn=cancelled_fn,
-            write_boundary_dxf=True,
+            write_boundary_dxf=False,   # written to out_dir below instead
         )
         if cancelled_fn():
             log_fn("Cancelled during auto-tiling.")
@@ -1297,6 +1297,14 @@ def process_all_tiles(
     ckpt["status"] = "complete"
     _ckpt_save(out_dir, ckpt)
     log_fn(f"  Checkpoint complete: all {total} tiles processed.")
+
+    # ── Tile index DXF → output folder ───────────────────────────────────
+    try:
+        from .tiler import write_tile_boundaries_dxf as _write_dxf
+        dxf_path = out_dir / "tile_index.dxf"
+        _write_dxf(tile_dir, out_path=dxf_path, log_fn=log_fn)
+    except Exception as _e:
+        log_fn(f"  WARNING: tile index DXF not written: {_e}")
 
     # ── Write CSV summary ─────────────────────────────────────────────────
     csv_path = out_dir / "bird_contacts.csv"
