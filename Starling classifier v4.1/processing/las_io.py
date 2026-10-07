@@ -328,21 +328,42 @@ def e57_scan_count(filepath: str | Path) -> int:
     return count
 
 
+_E572LAS_PATHS = [
+    r"C:\LAStools\bin\e572las.exe",
+    r"C:\Program Files\LAStools\bin\e572las.exe",
+    r"C:\lastools\bin\e572las.exe",
+]
+
+
+def _find_e572las() -> str | None:
+    import shutil
+    found = shutil.which("e572las") or shutil.which("e572las.exe")
+    if found:
+        return found
+    for p in _E572LAS_PATHS:
+        if Path(p).exists():
+            return p
+    return None
+
+
 def convert_e57_to_laz(
     filepath: str | Path,
     out_path: str | Path | None = None,
     log_fn=print,
 ) -> Path:
     """
-    Convert an E57 file to a single LAZ file using pye57's low-level
-    chunked reader.  Never calls read_scan() (which pre-allocates the full
-    array), so even a 4-billion-point scan uses only ~400 MB peak RAM.
+    Convert an E57 file to a single LAZ file.
+
+    Primary path: e572las.exe (LAStools free tool) — handles any size file
+    in one pass with minimal RAM.  Falls back to pye57 chunked reader when
+    e572las is not installed.
 
     Returns the path to the written LAZ.
     """
     import pye57
-    from pye57 import libe57
     from pye57.e57 import COORDINATE_SYSTEMS, SUPPORTED_CARTESIAN_POINT_FIELDS
+
+    import subprocess as _sub, os as _os
 
     E57_CONVERT_CHUNK = 5_000_000   # points per chunk — ~400 MB peak RAM
 
@@ -353,6 +374,28 @@ def convert_e57_to_laz(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     log_fn(f"Converting E57 -> LAZ: {filepath.name}")
+
+    # ── Fast path: e572las.exe (LAStools) ────────────────────────────────
+    e572las = _find_e572las()
+    if e572las:
+        log_fn(f"  Using e572las.exe (LAStools) for conversion")
+        args = [e572las, str(filepath), "-o", str(out_path)]
+        proc = _sub.Popen(
+            args, stdout=_sub.PIPE, stderr=_sub.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            env={**_os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        for line in proc.stdout:
+            log_fn(f"  {line.rstrip()}")
+        proc.wait()
+        if proc.returncode != 0:
+            log_fn(f"  WARNING: e572las.exe failed (exit {proc.returncode}), "
+                   f"falling back to pye57 ...")
+        elif out_path.exists():
+            log_fn(f"  Done -> {out_path.name}")
+            return out_path
+
+    log_fn(f"  Using pye57 chunked reader ...")
 
     e57 = pye57.E57(str(filepath))
     try:
@@ -431,7 +474,8 @@ def convert_e57_to_laz(
                f"{'RGB+' if has_rgb else ''}{'intensity' if has_intensity else 'XYZ-only'}) ...")
 
         total_written = 0
-        with laspy.LasWriter(str(out_path), header=laz_hdr, do_compress=True) as writer:
+        with open(str(out_path), "wb") as _f, \
+             laspy.LasWriter(_f, header=laz_hdr, do_compress=True) as writer:
             for i, (hdr, pt_count, want_intensity, want_colors) in enumerate(scan_meta):
                 log_fn(f"  Scan {i+1}/{n_scans}: converting {pt_count:,} pts ...")
 
