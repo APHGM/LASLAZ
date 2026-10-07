@@ -187,9 +187,12 @@ class WorkerThread(QThread):
                     args = [_sys.executable, str(script), source,
                             "--out", str(Path(self.out_dir))]
                     try:
+                        import os as _os
+                        _env = {**_os.environ, "PYTHONIOENCODING": "utf-8"}
                         proc = _sub.Popen(
                             args, stdout=_sub.PIPE, stderr=_sub.STDOUT,
                             text=True, encoding="utf-8", errors="replace",
+                            env=_env,
                         )
                         for line in proc.stdout:
                             self.log.emit(line.rstrip())
@@ -277,9 +280,11 @@ class E57WorkerThread(QThread):
                 if self._out_dir:
                     args += ["--out", str(self._out_dir)]
 
+                import os as _os2
                 proc = subprocess.Popen(
                     args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace",
+                    env={**_os2.environ, "PYTHONIOENCODING": "utf-8"},
                 )
                 while True:
                     line = proc.stdout.readline()
