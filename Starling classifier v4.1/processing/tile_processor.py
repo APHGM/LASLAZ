@@ -1023,6 +1023,32 @@ def process_single_file(
 # Public entry point — dispatches sequential or parallel
 # ────────────────────────────────────────────────────────────────────────────
 
+_CHECKPOINT_FILE = "_starling_checkpoint.json"
+
+
+def _ckpt_load(out_dir: Path) -> dict:
+    """Load checkpoint from out_dir. Returns empty dict if none exists."""
+    p = out_dir / _CHECKPOINT_FILE
+    if not p.exists():
+        return {}
+    try:
+        import json
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _ckpt_save(out_dir: Path, data: dict) -> None:
+    import json, datetime
+    data["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    try:
+        (out_dir / _CHECKPOINT_FILE).write_text(
+            json.dumps(data, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass   # never crash on checkpoint write failure
+
+
 def process_all_tiles(
     tile_dir: str | Path,
     out_dir: str | Path,
@@ -1031,6 +1057,8 @@ def process_all_tiles(
     progress_fn: Callable[[int, int], None] = lambda i, n: None,
     cancelled_fn: Callable[[], bool] = lambda: False,
 ) -> Path:
+    import datetime
+
     tile_dir = Path(tile_dir)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1045,10 +1073,30 @@ def process_all_tiles(
                "neighbour-buffer loading is disabled for these tiles "
                "(each tile processed standalone, no edge smoothing).")
 
-    # Build per-tile jobs (so workers don't need the tile_index)
+    # ── Checkpoint: resume support ───────────────────────────────────────
+    ckpt = _ckpt_load(out_dir)
+    already_done: set[str] = set(ckpt.get("completed", []))
+    if already_done:
+        log_fn(f"  Checkpoint found: {len(already_done)}/{total} tiles already done "
+               f"— resuming from where it left off.")
+    ckpt.update({
+        "tile_dir": str(tile_dir),
+        "total": total,
+        "completed": sorted(already_done),
+        "started_at": ckpt.get("started_at",
+                               datetime.datetime.now().isoformat(timespec="seconds")),
+        "status": "in_progress",
+    })
+    _ckpt_save(out_dir, ckpt)
+
+    # Build per-tile jobs — skip tiles already completed in a previous run
     tile_size_int = int(params.tile_size)
     jobs = []
+    skipped = 0
     for (east, north), tile_path in tiles:
+        if tile_path.name in already_done:
+            skipped += 1
+            continue
         jobs.append({
             "tile_path": str(tile_path),
             "neighbour_paths": [str(p) for p in
@@ -1057,6 +1105,9 @@ def process_all_tiles(
             "out_dir": str(out_dir),
             "_size": tile_path.stat().st_size,
         })
+    if skipped:
+        log_fn(f"  Skipping {skipped} already-completed tile(s). "
+               f"{len(jobs)} remaining.")
 
     # ── RAM-aware worker cap ─────────────────────────────────────────────
     # Use actual median tile point count from headers to refine the cap;
@@ -1100,7 +1151,14 @@ def process_all_tiles(
 
     all_clusters: list[dict] = []
     tile_results: list[dict] = []
-    completed = 0
+    completed = skipped   # count already-done tiles in progress bar
+
+    def _mark_done(tile_path_str: str) -> None:
+        name = Path(tile_path_str).name
+        already_done.add(name)
+        ckpt["completed"] = sorted(already_done)
+        ckpt["completed_count"] = len(already_done)
+        _ckpt_save(out_dir, ckpt)
 
     if sequential:
         for job in jobs:
@@ -1116,6 +1174,7 @@ def process_all_tiles(
             })
             all_clusters.extend(result["clusters"])
             completed += 1
+            _mark_done(job["tile_path"])
             progress_fn(completed, total)
     else:
         # Separate giants (run sequentially) from normals (parallel)
@@ -1214,6 +1273,7 @@ def process_all_tiles(
                 })
                 all_clusters.extend(result["clusters"])
                 completed += 1
+                _mark_done(futures[fut]["tile_path"])
                 progress_fn(completed, total)
 
         # Then giants, in-process (less overhead, full RAM available)
@@ -1230,7 +1290,13 @@ def process_all_tiles(
             })
             all_clusters.extend(result["clusters"])
             completed += 1
+            _mark_done(job["tile_path"])
             progress_fn(completed, total)
+
+    # ── Mark checkpoint complete ──────────────────────────────────────────
+    ckpt["status"] = "complete"
+    _ckpt_save(out_dir, ckpt)
+    log_fn(f"  Checkpoint complete: all {total} tiles processed.")
 
     # ── Write CSV summary ─────────────────────────────────────────────────
     csv_path = out_dir / "bird_contacts.csv"
