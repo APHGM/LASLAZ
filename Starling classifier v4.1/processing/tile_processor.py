@@ -150,6 +150,10 @@ class ProcessParams:
     veg_low_max: float = 1.00            # boundary low/med
     veg_med_max: float = 3.00            # boundary med/high
     noise_below_ground: float = -0.10    # nZ below this = class 7 noise
+    # Probable-ground band: points within this extra margin beyond the ground
+    # threshold on both sides get class 12 instead of veg/noise/unclassified.
+    # 0.0 = disabled.  E.g. 0.10 → confident ground ± class_thr, probable ± (class_thr+0.10)
+    probable_ground_band: float = 0.0
     # Model key points (thinned ground for TIN building)
     classify_model_keys: bool = False
     modelkey_step_m: float = 8.0
@@ -503,12 +507,17 @@ def _process_one_tile(job: dict, inline_log_fn=None) -> dict:
         try:
             # Protect buildings from being overwritten by height classification
             protect_extra = (CLASS_BUILDING,) if photo_mode else ()
+            _gnd_thr = (params.slam_csf_class_threshold if slam_mode
+                        else params.photo_csf_class_threshold if photo_mode
+                        else params.csf_class_threshold)
             classification = classify_heights(
                 classification, nz,
                 veg_low_min=params.veg_low_min,
                 veg_low_max=params.veg_low_max,
                 veg_med_max=params.veg_med_max,
                 noise_below_ground=params.noise_below_ground,
+                probable_ground_band=params.probable_ground_band,
+                ground_class_thr=_gnd_thr,
                 protect_classes=(2, 20) + protect_extra,
             )
             n_low_veg  = int((classification == 3).sum())
@@ -803,10 +812,19 @@ def _classify_streaming(
 
                 if params.classify_vegetation:
                     above = ~gnd
-                    cls[above & (nz >= params.veg_low_min) & (nz < params.veg_low_max)]  = 3
-                    cls[above & (nz >= params.veg_low_max) & (nz < params.veg_med_max)]  = 4
-                    cls[above & (nz >= params.veg_med_max)]                               = 5
-                    cls[nz < params.noise_below_ground]                                   = 7
+                    pg_band = params.probable_ground_band
+                    if pg_band > 0.0:
+                        # Probable ground: just beyond the confident threshold on both sides
+                        pg = above & (np.abs(nz) <= ground_class_thr + pg_band)
+                        cls[pg] = 12
+                        unresolved = above & ~pg
+                    else:
+                        unresolved = above
+                    cls[unresolved & (nz >= params.veg_low_min) & (nz < params.veg_low_max)]  = 3
+                    cls[unresolved & (nz >= params.veg_low_max) & (nz < params.veg_med_max)]  = 4
+                    cls[unresolved & (nz >= params.veg_med_max)]                               = 5
+                    # Only flag noise for non-ground, non-probable-ground points
+                    cls[unresolved & (nz < params.noise_below_ground)]                         = 7
 
                 chunk.classification = cls
                 writer.write_points(chunk)

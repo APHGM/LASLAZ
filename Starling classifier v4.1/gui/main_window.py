@@ -432,7 +432,7 @@ class BatchWorkerThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Starling Ground-Contact Classifier  —  V04.1 (WIP)")
+        self.setWindowTitle("Starling Ground-Contact Classifier  —  V04.2 (WIP)")
         self.setMinimumSize(560, 380)
         # Size to screen — leave 60 px margin on each axis for taskbars/titlebars
         from PyQt6.QtWidgets import QApplication
@@ -1028,6 +1028,22 @@ class MainWindow(QMainWindow):
         self._add_dspin(g, 3, "Low noise threshold nZ (m):", -2.0, -0.01, -0.10, 0.01, "noise_thr")
         outer.addLayout(g)
 
+        # Probable ground
+        self.prob_gnd_chk = QCheckBox(
+            "Tag probable ground  (class 12)  — uncertain points just beyond ground threshold"
+        )
+        self.prob_gnd_chk.setToolTip(
+            "Points slightly outside the confident ground band (both above and below)\n"
+            "are tagged class 12 instead of low-veg / noise / unclassified.\n"
+            "Useful on slopes and SLAM scans — review and merge to class 2 manually\n"
+            "in CloudCompare or TerraSolid if they are genuine ground."
+        )
+        self.prob_gnd_chk.setChecked(False)
+        outer.addWidget(self.prob_gnd_chk)
+        g3 = QGridLayout()
+        self._add_dspin(g3, 0, "Probable ground band (m):", 0.01, 1.0, 0.10, 0.01, "prob_gnd_band")
+        outer.addLayout(g3)
+
         # Model keypoints
         self.modelkey_chk = QCheckBox("Also classify model keypoints  (class 8)")
         self.modelkey_chk.setToolTip(
@@ -1149,6 +1165,7 @@ class MainWindow(QMainWindow):
             veg_low_max=self._veg_low_max.value(),
             veg_med_max=self._veg_med_max.value(),
             noise_below_ground=self._noise_thr.value(),
+            probable_ground_band=self._prob_gnd_band.value() if self.prob_gnd_chk.isChecked() else 0.0,
             classify_model_keys=self.modelkey_chk.isChecked(),
             modelkey_step_m=self._modelkey_step.value(),
             merge_output_to_single=self.merge_output_chk.isChecked(),

@@ -6,27 +6,29 @@ Uses nZ (height above ground) which is already computed during
 the ground classification stage.
 
 ASPRS classes assigned:
-    2  ground       (unchanged)
-    3  low veg      (veg_low_min ≤ nZ < veg_low_max)
-    4  med veg      (veg_low_max ≤ nZ < veg_med_max)
-    5  high veg     (nZ ≥ veg_med_max)
-    7  low noise    (nZ ≤ noise_below_ground, i.e. below surface)
-    8  model key    (thinned ground sample — for TIN building)
-    20 bird contact (set by bird detector before us)
+    2  ground          (unchanged)
+    3  low veg         (veg_low_min ≤ nZ < veg_low_max)
+    4  med veg         (veg_low_max ≤ nZ < veg_med_max)
+    5  high veg        (nZ ≥ veg_med_max)
+    7  low noise       (nZ ≤ noise_below_ground, i.e. below surface)
+    8  model key       (thinned ground sample — for TIN building)
+    12 probable ground (just beyond ground threshold — uncertain, review manually)
+    20 bird contact    (set by bird detector before us)
 """
 
 import numpy as np
 
 
 # Class codes
-CLASS_UNCLASSIFIED = 1
-CLASS_GROUND       = 2
-CLASS_LOW_VEG      = 3
-CLASS_MED_VEG      = 4
-CLASS_HIGH_VEG     = 5
-CLASS_LOW_NOISE    = 7
-CLASS_MODEL_KEY    = 8
-CLASS_BIRD_CONTACT = 20
+CLASS_UNCLASSIFIED    = 1
+CLASS_GROUND          = 2
+CLASS_LOW_VEG         = 3
+CLASS_MED_VEG         = 4
+CLASS_HIGH_VEG        = 5
+CLASS_LOW_NOISE       = 7
+CLASS_MODEL_KEY       = 8
+CLASS_PROBABLE_GROUND = 12
+CLASS_BIRD_CONTACT    = 20
 
 
 def classify_heights(
@@ -36,6 +38,8 @@ def classify_heights(
     veg_low_max: float = 1.00,
     veg_med_max: float = 3.00,
     noise_below_ground: float = -0.10,
+    probable_ground_band: float = 0.0,
+    ground_class_thr: float = 0.05,
     protect_classes: tuple[int, ...] = (CLASS_GROUND, CLASS_BIRD_CONTACT),
 ) -> np.ndarray:
     """
@@ -44,6 +48,10 @@ def classify_heights(
     Points already labelled as `protect_classes` are NOT overwritten —
     so ground stays ground, birds stay birds. Everything else above ground
     gets veg classes by nZ; everything below ground becomes low noise.
+
+    When probable_ground_band > 0, points within (ground_class_thr,
+    ground_class_thr + probable_ground_band) of the surface on both sides
+    are tagged class 12 (probable ground) instead of veg/noise/unclassified.
 
     Returns the updated classification array (modified in place + returned).
     """
@@ -54,7 +62,15 @@ def classify_heights(
     finite = np.isfinite(nz)
     cand = candidates & finite
 
-    # Low noise — below ground surface
+    # Probable ground band (class 12) — beyond confident ground on both sides
+    if probable_ground_band > 0.0:
+        pg = cand & (np.abs(nz) <= ground_class_thr + probable_ground_band)
+        classification[pg] = CLASS_PROBABLE_GROUND
+        # Protect probable-ground from veg/noise overwrite below
+        protected2 = protected | pg
+        cand = (~protected2) & finite
+
+    # Low noise — below ground surface (never overwrites ground or probable-ground)
     low_noise = cand & (nz <= noise_below_ground)
     classification[low_noise] = CLASS_LOW_NOISE
 
