@@ -1,42 +1,39 @@
-# Starling Ground-Contact Classifier — v2.0 (Photogrammetry Edition)
+# Starling Ground-Contact Classifier — v4.2
 
-A Windows desktop application (PyQt6) that classifies LiDAR **and drone
-photogrammetry** point clouds — ground, vegetation, buildings, low noise, and
-starling bird-contact points.
+A Windows desktop application (PyQt6) that classifies LiDAR, SLAM, and drone
+photogrammetry point clouds — ground, vegetation, buildings, low noise, probable
+ground, and starling bird-contact points.
 
-### v2.0 additions
-- **Drone photogrammetry mode** — RGB/NIR vegetation index (NDVI or VARI),
-  building detection via plane RANSAC, tightened CSF for smoother SfM surfaces
-- **Automatic index selection** — NDVI when NIR present, VARI when RGB-only,
-  falls back gracefully when neither exists
-- **Building class 6** (ASPRS) — planar rooftops extracted BEFORE CSF sees them
-  so wide flat roofs no longer become "ground"
-- **Photogrammetry-appropriate defaults** — auto-disables bird detection,
-  higher rigidness, smaller class threshold
+---
 
-It works by:
-1. Classifying **ground** with the Cloth Simulation Filter (CSF) or a Grid-Minimum
-   morphological filter
-2. Finding **small clusters of points just above the ground surface** (height + footprint
-   filtered, bird-sized only) using DBSCAN
-3. Writing classified LAS/LAZ files (ASPRS classes: `2 = ground`, `20 = bird contact`)
-   plus a CSV of bird-cluster centroids
+## Version History
+
+| Version | Highlights |
+|---|---|
+| **v4.2** | Probable ground (class 12), slope noise fix, always-stream ≥30M pts |
+| **v4.1** | E57 input support, E57→LAZ batch tab, DXF to output folder |
+| **v4.0** | Batch Process tab, multi-file queue, auto-detect per file |
+| **v3 / v0.4** | Streaming 2-pass classify (handles 400M+ pts, ~400 MB RAM), SLAM mode, z-range wall filter, bilinear ground interpolation |
+| **v2.0** | Drone photogrammetry mode, RGB/NIR vegetation index, building detection |
+| **v1.x** | Initial release — CSF ground, DBSCAN bird detection, tile pipeline |
 
 ---
 
 ## Table of Contents
 1. [System Requirements](#system-requirements)
-2. [Quick Start (Existing Setup)](#quick-start-existing-setup)
+2. [Quick Start](#quick-start)
 3. [Fresh Install on a New Machine](#fresh-install-on-a-new-machine)
-4. [Running the App](#running-the-app)
-5. [GUI Reference](#gui-reference)
-6. [Recommended Parameter Settings](#recommended-parameter-settings)
-7. [Folder Layout](#folder-layout)
-8. [Building a Standalone EXE](#building-a-standalone-exe)
-9. [Distributing the EXE](#distributing-the-exe)
-10. [Troubleshooting](#troubleshooting)
-11. [Architecture Notes](#architecture-notes)
-12. [Known Limitations](#known-limitations)
+4. [Input Modes](#input-modes)
+5. [Output Classes](#output-classes)
+6. [GUI Reference](#gui-reference)
+7. [Point Cloud Source Modes](#point-cloud-source-modes)
+8. [Streaming Classification](#streaming-classification)
+9. [Batch Processing](#batch-processing)
+10. [E57 → LAZ Conversion](#e57--laz-conversion)
+11. [Recommended Settings](#recommended-settings)
+12. [Building a Standalone EXE](#building-a-standalone-exe)
+13. [Troubleshooting](#troubleshooting)
+14. [Architecture Notes](#architecture-notes)
 
 ---
 
@@ -46,26 +43,25 @@ It works by:
 |---|---|---|
 | OS | Windows 10/11 | Windows 11 |
 | Python | 3.10 | **3.12** (tested) |
-| RAM | 16 GB | **32 – 64 GB** for large terrestrial scans |
-| CPU | 4 cores | 8+ cores (parallel processing) |
-| Disk | 50 GB free | 200+ GB for big datasets + intermediate tiles |
+| RAM | 16 GB | **64–128 GB** for 300M+ point clouds |
+| CPU | 4 cores | 8+ cores |
+| Disk | 50 GB free | 200+ GB for large datasets |
 
-Tested with: Python 3.12, Windows 11, 64 GB RAM, Intel i7.
+> **Large files:** The streaming path handles files of any size with ~400 MB peak RAM.
+> Files ≥ 30M points are automatically routed to streaming — no configuration needed.
 
 ---
 
-## Quick Start (Existing Setup)
-
-If everything is already installed:
+## Quick Start
 
 ```cmd
-:: Just launch the GUI
 start_gui.bat
 ```
 
-If you need to tile a huge LAZ first, then launch the GUI:
+Or for E57 batch conversion without the full GUI:
+
 ```cmd
-run.bat
+convert_e57.bat
 ```
 
 ---
@@ -73,7 +69,7 @@ run.bat
 ## Fresh Install on a New Machine
 
 ### Step 1 — Install Python 3.12
-Download from https://www.python.org/downloads/windows/ — **tick "Add Python to PATH"** during install.
+Download from https://www.python.org/downloads/windows/ — tick **"Add Python to PATH"**.
 
 ### Step 2 — Create a virtual environment
 ```cmd
@@ -82,16 +78,15 @@ py -3.12 -m venv arunpy
 arunpy\Scripts\activate
 ```
 
-### Step 3 — Clone or copy the project folder
-Copy the entire `StarlingClassifier\` folder to your new machine.
+### Step 3 — Copy the project folder
+Copy the entire `Starling classifier v4.1\` folder to your machine.
 
 ### Step 4 — Install dependencies
 ```cmd
-cd D:\YourPath\StarlingClassifier
 pip install -r requirements.txt
 ```
 
-`requirements.txt` contents:
+`requirements.txt`:
 ```
 PyQt6
 laspy[lazrs]
@@ -99,18 +94,17 @@ numpy
 scipy
 scikit-learn
 cloth-simulation-filter
+pye57
 ```
 
-> **Note:** `lazrs` is the LAZ compression backend — `laspy[lazrs]` installs both together. If LAZ writing ever fails with a backend error, run `pip install lazrs` explicitly.
-
-### Step 5 — Update the venv path in the launcher scripts
-Edit `start_gui.bat`, `run.bat`, and `build.bat`. Change the line:
+### Step 5 — Update venv paths in launcher scripts
+Edit `start_gui.bat`, `build.bat`, `convert_e57.bat` — change:
 ```bat
 set "PYTHON=D:\VSCode_Working\Python\arunpy\Scripts\python.exe"
 ```
-to point at your new venv's `python.exe`.
+to your venv's `python.exe`.
 
-### Step 6 — Test it
+### Step 6 — Test
 ```cmd
 start_gui.bat
 ```
@@ -118,332 +112,339 @@ The GUI should open within ~5 seconds.
 
 ---
 
-## Running the App
+## Input Modes
 
-There are **three ways** to run depending on your input:
+The **Classify** tab supports three input modes:
 
-### Option A — Single LAZ file (small to medium, <300 M points)
-Best for typical terrestrial scans that fit in RAM.
+| Mode | Use when |
+|---|---|
+| **Single file** | One LAZ/LAS/E57 file — any size (streaming handles 400M+ pts) |
+| **Tile folder** | Folder of pre-tiled LAZ files named `<easting>_<northing>.laz` |
+| **Multi-file merge** | Several files to merge then classify as one |
 
-1. Launch GUI (`start_gui.bat`)
-2. Input mode: **"Single LAZ file"**
-3. Browse to your `.las` or `.laz` file
-4. **Tick "Skip tiling — process whole file as one"** ✅ (recommended)
-5. Choose an output folder
-6. Click **Start Processing**
+For E57 files: the app auto-converts to LAZ first (subprocess-isolated so a bad E57 won't crash the GUI), then classifies.
 
-### Option B — Single LAZ file with auto-tiling (very large, >300 M points)
-For scans too big to fit in RAM.
+---
 
-1. Launch GUI
-2. Input mode: **"Single LAZ file"**
-3. Browse to your file
-4. **Untick "Skip tiling"** so the file is split first
-5. Set tile size (default 100 m; use 25 m for very dense scans)
-6. Choose output folder, click Start
+## Output Classes
 
-The app tiles into `Tile_<filename>\` next to your input, then processes each tile.
+| Class | Name | Notes |
+|---|---|---|
+| 1 | Unclassified | Points outside all bands |
+| **2** | **Ground** | Confident ground (within CSF class threshold) |
+| 3 | Low vegetation | 0.10 – 1.00 m above ground |
+| 4 | Medium vegetation | 1.00 – 3.00 m |
+| 5 | High vegetation | ≥ 3.00 m |
+| 6 | Building | Photogrammetry mode only |
+| 7 | Low noise | Below ground surface |
+| 8 | Model keypoints | Thinned ground for TIN — optional |
+| **12** | **Probable ground** | Just beyond ground threshold — uncertain, review manually |
+| 20 | Bird contact | DBSCAN clusters near ground |
 
-### Option C — Pre-tiled folder of LAZ tiles
-If you already have tiles named `<easting>_<northing>.laz`.
-
-1. Launch GUI
-2. Input mode: **"Tile folder"**
-3. Browse to the folder
-4. Choose output folder, click Start
-
-### Output
-- `<tilename>_classified.laz` — LAS/LAZ with ASPRS classification codes:
-  | Class | Meaning |
-  |---|---|
-  | 1 | Unclassified |
-  | **2** | **Ground** |
-  | **3** | **Low vegetation** (0.10 – 1.0 m above ground) |
-  | **4** | **Medium vegetation** (1.0 – 3.0 m) |
-  | **5** | **High vegetation** (≥ 3.0 m) |
-  | **7** | **Low noise** (below ground surface) |
-  | **8** | **Model keypoints** (thinned ground for TIN) — optional |
-  | **20** | **Bird contact** |
-- `bird_contacts.csv` — one row per detected bird cluster (centroid X/Y/Z, point count, footprint)
-- `processing_summary.txt` — human-readable processing report
+**Class 12 — Probable Ground** (new in v4.2): Points slightly outside the confident
+ground band on both sides (above and below). Useful on slopes and SLAM scans where
+the CSF cloth may not perfectly follow transitions. Review in CloudCompare or
+TerraSolid and merge to class 2 if genuinely ground.
 
 ---
 
 ## GUI Reference
 
-### Input / Output
+### Classify Tab
+
+#### Input / Output
 | Field | Notes |
 |---|---|
-| Input mode | "Tile folder" or "Single LAZ file" |
-| Buffer (m) | Edge buffer when processing tiles (5 m default) |
-| Parallel workers | 1 = sequential. Higher = process N tiles in parallel processes. Auto-default = `cpu_count / 2`. |
-| Output format | LAZ (compressed, recommended) or LAS (uncompressed) |
-| LAS version | 1.4 (newer, recommended) or 1.2 (compatibility) |
+| Input mode | Single file / Tile folder / Multi-file merge |
+| Output folder | Where classified files and CSVs are written |
+| Skip tiling | Process the whole file as one (recommended for single files ≤ RAM) |
+| Tile size | Auto (density-based) or manual. Used when Skip tiling is off. |
 
-### Ground Classification
-| Source | When to use |
+#### Point Cloud Source
+Select the scanner type — the app uses source-specific CSF defaults:
+
+| Source | Cloth res | Class threshold | Notes |
+|---|---|---|---|
+| **LiDAR** | 0.30 m | ±5 cm | Default for airborne / terrestrial |
+| **Photogrammetry** | 2.00 m | ±5 cm | Tighter CSF, vegetation index, building detection |
+| **SLAM / Indoor** | 0.50 m | ±20 cm | Wall rejection, median z_grid smoothing |
+
+#### Ground Classification
+| Option | Description |
 |---|---|
-| **Compute fresh** | Default. Runs CSF or Grid Minimum on the points. |
-| **Use existing classification 2** | When the LAS already has ground classified (e.g. from TerraScan / scanner software). Skips CSF, reads class 2 directly, only runs vegetation/bird detection on top. |
+| Compute fresh | Run CSF or Grid Minimum (default) |
+| Use existing class 2 | Skip CSF, use pre-classified ground from scanner software |
 
-| Method | When to use |
-|---|---|
-| **CSF** (Cloth Simulation Filter) | **Recommended** for "Compute fresh". Handles slopes, vegetation, buildings well. |
-| **Grid Minimum** | Fallback for very flat ground or when CSF is unavailable. Pure numpy/scipy. |
+**CSF parameters:**
+| Field | Default | Notes |
+|---|---|---|
+| Cloth resolution | 0.30 m | Smaller = more detail, slower |
+| Class threshold | 0.05 m | ±distance from cloth = ground band |
+| Rigidness | 1 | 1=slopes, 2=mixed, 3=flat |
+| Iterations | 1000 | More = slower but more accurate |
+| Slope smooth | ✓ | Recommended — prevents cloth snagging |
+| Pre-thin voxel | 0.10 m | Reduces CSF input while preserving ground |
 
-### Height Classification (new — TerraScan-style)
-| Field | Description |
-|---|---|
-| Classify vegetation by height | Toggle — runs height-band classification using `nZ` from ground stage |
-| Low veg starts at nZ | Default 0.10 m (excludes ground noise) |
-| Low / Med boundary | Default 1.00 m |
-| Med / High boundary | Default 3.00 m |
-| Low noise threshold | Default −0.10 m (points below ground = class 7) |
-| Classify model keypoints | Toggle — keeps lowest ground point per N × N grid cell as class 8 |
-| Model keypoint grid step | Default 8 m (matches TerraScan macro convention) |
+#### Height Classification
+| Field | Default | Notes |
+|---|---|---|
+| Low veg starts at nZ | 0.10 m | Points below this are ground-adjacent |
+| Low / Med boundary | 1.00 m | |
+| Med / High boundary | 3.00 m | |
+| Low noise threshold | −0.10 m | Points further below ground = class 7 |
+| Tag probable ground | Off | Enable to mark uncertain slope points as class 12 |
+| Probable ground band | 0.10 m | Extra margin beyond ground threshold on both sides |
+| Model keypoints | Off | Class 8 — thinned ground for TIN building |
+| Keypoint grid step | 8 m | Mirrors TerraScan FnScanClassifyModelKey |
 
-These mirror the TerraScan macro functions `FnScanClassifyHgtGrd`, `FnScanClassifyLow`,
-and `FnScanClassifyModelKey`.
-
-### Bird Contact Detection
-| Field | Description |
-|---|---|
-| Min height above ground (m) | Lowest nZ to consider as bird (default 0.02 — excludes ground noise) |
-| Max height above ground (m) | Highest nZ to consider (default 0.40 — taller than this isn't a bird) |
-| DBSCAN eps (m) | Cluster spatial extent (default 0.30 — bird body size) |
-| DBSCAN min points | Minimum points to form a cluster (default 8) |
-| Min cluster footprint (m²) | Reject clusters smaller than this (default 0.005) |
-| Max cluster footprint (m²) | Reject clusters bigger than this (default 1.0) |
+#### Bird Detection
+| Field | Default | Notes |
+|---|---|---|
+| Min height (nZ) | 0.02 m | Exclude ground noise |
+| Max height (nZ) | 0.40 m | Taller than a starling = not a bird |
+| DBSCAN eps | 0.30 m | Cluster spatial extent (bird body size) |
+| DBSCAN min pts | 8 | Minimum points to form a cluster |
+| Min footprint | 0.005 m² | Reject dust/noise |
+| Max footprint | 1.0 m² | Reject kerbs, signs, vehicles |
 
 ---
 
-## Recommended Parameter Settings
+## Point Cloud Source Modes
 
-### CSF — tight ground band (recommended defaults)
-```
-Cloth resolution:  0.30 m
-Class threshold:   0.05 m
-Rigidness:         1   (1=slope, 2=mixed, 3=flat)
-Iterations:        800–1000
-Pre-thin voxel:    0.10 m
-Slope smooth:      ✓ enabled
-```
+### LiDAR (default)
+Standard airborne or terrestrial LiDAR. CSF cloth resolution 0.30 m, ±5 cm ground band.
 
-### CSF — speed mode (dense data, large tiles)
-```
-Cloth resolution:  0.50 m   (4× fewer cloth particles)
-Class threshold:   0.10 m
-Rigidness:         1
-Iterations:        150–300  (much faster)
-Pre-thin voxel:    0.20 m   (4× fewer input points)
-Slope smooth:      ✓ enabled
-```
+### Photogrammetry
+Dense SfM point clouds from drones (Recap, Agisoft, Pix4D). Activates:
+- Vegetation index from RGB (NDVI with NIR, VARI without, ExG fallback)
+- Building detection via RANSAC plane fitting → class 6 before CSF
+- Tighter cloth (2.0 m) suited to smoother photogrammetry surfaces
+- Bird detection disabled (too many false positives in dense RGB clouds)
 
-### Bird detection — tighter false-positive control
+### SLAM / Indoor-Outdoor
+Leica BLK, Faro Focus, NavVis, Matterport-style scans. Activates:
+- Coarser cloth (0.50 m) — less wall snagging
+- Wider ground threshold (±20 cm) — handles floor surface variation
+- **Z-range wall filter**: voxel cells spanning > 0.50 m in Z are walls/columns, excluded before CSF
+- **Median z_grid smoothing**: 3-cell radius smooth on the ground raster to handle gaps from filtered walls
+- Workers forced to 1 (SLAM scans are typically single large files)
+
+---
+
+## Streaming Classification
+
+Files ≥ **30 million points** are automatically processed in streaming mode — no
+configuration needed.
+
+**How it works (2-pass):**
+
+**Pass 1 — Ground surface:**
+Stream the file in 5M-point chunks. Each chunk updates a 2D voxel grid (0.10 m cells)
+tracking minimum Z per cell. After all chunks: ~1M ground candidates → CSF → ground
+elevation raster (z_grid).
+
+**Pass 2 — Classify all points:**
+Stream again. For each chunk, compute nZ by bilinear interpolation of z_grid. Assign
+ground / vegetation / probable-ground / noise classes and write to the output file.
+
+**Peak RAM:** ~400 MB regardless of file size (tested on 883M point E57).
+
+**Note:** Bird detection is skipped in streaming mode. Re-tile to <30M pts per tile
+if bird detection is needed.
+
+---
+
+## Batch Processing
+
+The **Batch Process** tab processes a folder of LAZ/LAS files sequentially.
+
+1. Browse to a folder of LAZ/LAS files
+2. Click **Scan Folder** — shows filenames and point counts
+3. Configure output (alongside each source file, or a custom root folder)
+4. Tick **Skip tiling** if files are already clean (recommended)
+5. Click **Start Batch**
+
+Classification settings (source type, CSF params, vegetation thresholds) are taken
+from the **Classify** tab.
+
+Large files ≥ 30M points automatically use streaming — no RAM budget needed.
+
+---
+
+## E57 → LAZ Conversion
+
+Recap, Faro, Leica, and other scanners export E57 format. The app handles E57 in two ways:
+
+### 1. In the Classify tab
+Select an `.e57` file directly. It is converted to LAZ first (subprocess-isolated)
+then classified normally.
+
+### 2. E57 → LAZ tab (batch)
+Dedicated converter for bulk E57 conversion before classification:
+
+1. Browse to a folder of E57 files
+2. Optionally set a separate output folder (default: alongside each E57)
+3. Click **Scan** then **Convert All**
+
+All scans inside each E57 are merged into a single LAZ. RGB and intensity are
+preserved when available. Scan pose transforms are applied so coordinates are in the
+project's global frame.
+
+### 3. Standalone command-line converter
+```cmd
+convert_e57.bat
 ```
-Max height above ground: 0.15 m   (instead of 0.40 — starling standing height)
-Max cluster footprint:   0.30 m²  (instead of 1.0 — kerbs/sigs/vehicles excluded)
-DBSCAN min points:       15       (instead of 8 — denser cluster required)
+Or directly:
+```cmd
+python convert_e57.py "P:\path\to\file.e57"
+python convert_e57.py "P:\folder"  --out "Q:\output"  --recursive
 ```
 
 ---
 
-## Folder Layout
+## Recommended Settings
 
+### LiDAR — default (outdoor terrestrial / airborne)
 ```
-StarlingClassifier/
-├── main.py                  # GUI entry point
-├── tile_single_laz.py       # CLI tiler (streams LAZ → tiles)
-├── start_gui.bat            # Double-click to launch GUI
-├── run.bat                  # CLI tile + GUI flow (asks for paths)
-├── build.bat                # Clean PyInstaller build
-├── package.bat              # Zip dist/ for sharing
-├── build.spec               # PyInstaller spec (lean ~200 MB build)
-├── requirements.txt         # pip dependencies
-├── README.md                # this file
-├── CONTEXT.md               # AI handoff / brief for new chats
-├── Sterling.ico             # app icon
-├── setting.txt              # saved parameter values
-├── output/                  # default output location (created at runtime)
-├── dist/                    # PyInstaller output
-├── gui/
-│   └── main_window.py       # PyQt6 window + WorkerThread
-└── processing/
-    ├── tiler.py             # chunked LAZ → tiles
-    ├── tile_processor.py    # tile loop + ProcessParams dataclass + parallel dispatch
-    ├── ground_classifier.py # CSF + Grid Min implementations
-    ├── bird_detector.py     # height filter + DBSCAN + voxel downsample
-    └── las_io.py            # read_laz / write_classified_laz
+Source:           LiDAR
+Cloth resolution: 0.30 m
+Class threshold:  0.05 m  (±5 cm)
+Rigidness:        1
+Iterations:       1000
+Pre-thin voxel:   0.10 m
+Probable ground:  Off (or 0.10 m band on sloped sites)
+```
+
+### SLAM — indoor / outdoor walk-through scan
+```
+Source:           SLAM / Indoor-outdoor scan
+(All CSF params are set automatically by the app)
+Probable ground:  On, 0.15 m band  (slope transitions)
+```
+
+### Photogrammetry — drone RGB/NIR
+```
+Source:           Drone photogrammetry
+Vegetation index: Auto
+Building detect:  On
+(All other params set automatically)
+```
+
+### Speed mode — large dense tiles
+```
+Cloth resolution: 0.50 m   (fewer cloth particles)
+Class threshold:  0.10 m
+Iterations:       300
+Pre-thin voxel:   0.20 m
 ```
 
 ---
 
 ## Building a Standalone EXE
 
-For distribution to colleagues who don't have Python.
-
 ```cmd
 build.bat
 ```
 
-This:
-1. Cleans previous `dist/` and `build/` folders
-2. Re-runs PyInstaller with `--clean --noconfirm` against `build.spec`
-3. Produces `dist\StarlingClassifier\StarlingClassifier.exe`
+Produces `dist\StarlingClassifier\StarlingClassifier.exe` (~200–350 MB).
 
-**Build time:** ~3–6 minutes.
-**Output size:** ~200–300 MB (whole `dist/StarlingClassifier/` folder).
-
-### Build settings in `build.spec`
-- **Excludes** `torch`, `tensorflow`, `cupy`, `nvidia*`, `matplotlib`, `PyQt5`, `PySide6`, etc. — these would balloon the build to 5+ GB if included.
-- **Does NOT exclude `pandas`** — the `cloth-simulation-filter` package imports pandas internally; excluding it breaks CSF.
-- **Includes** `lazrs` as a hidden import so LAZ writing works.
-- **UTF-8 forced** via `PYTHONIOENCODING` env var so ✓/✗ characters in logs don't crash.
-
----
-
-## Distributing the EXE
-
-```cmd
-package.bat
-```
-
-This zips the `dist\StarlingClassifier\` folder into `StarlingClassifier_<YYYY-MM-DD>.zip`
-(plus `README.txt` for recipients).
-
-### Recipient instructions
-1. Extract the ZIP to any folder (e.g. `C:\Apps\StarlingClassifier\`)
-2. **Extract the WHOLE folder, not just the .exe**
-3. Double-click `StarlingClassifier.exe`
-4. No Python installation required
-
-### Distribution tips
-- File size ~200–300 MB — email systems will block; use OneDrive/SharePoint/WeTransfer link
-- Some antivirus tools flag PyInstaller exes as unknown (false-positive) — ask IT to whitelist if blocked
-- First launch takes ~5–15 sec (Windows scanning bundled DLLs); faster after that
+**Key build settings (`build.spec`):**
+- `pye57` must be included with `collect_all("pye57")` for E57 support
+- `lazrs` included as hidden import for LAZ writing
+- Heavy packages excluded: `torch`, `tensorflow`, `cupy`, `nvidia*`, `matplotlib`
 
 ---
 
 ## Troubleshooting
 
-### "FATAL ERROR: 'charmap' codec can't encode character …"
-Unicode encoding crash. Already mitigated by `sys.stdout.reconfigure(encoding="utf-8")` in `main.py` and `encoding="utf-8"` on file writes. If it recurs, check for new ✓/✗/° characters in log strings.
+### E57 file crashes the app silently
+pye57's C++ library (libE57Format) can segfault on malformed files. The GUI now
+runs E57 conversion in a subprocess — if it crashes, the GUI stays alive and reports
+the exit code. Test the file with the standalone converter first:
+```cmd
+python convert_e57.py "path\to\file.e57"
+```
+
+### Push to GitHub fails with HTTP 500
+The repo contains a large file (`Classification.7z`, ~1.3 GB) committed to history.
+GitHub blocks files > 100 MB. Use `git filter-repo` to remove it from history, or
+push only the `Starling classifier v4.1\` folder content.
+
+### Memory at 99% during batch
+Ensure the updated code is running (v4.2+). Files ≥ 30M points now always use
+streaming regardless of available RAM estimate. Restart the GUI after updating.
+
+### Ground points classified as low noise on slopes
+Fixed in v4.2. The noise check previously overrode ground classification on steep
+slope transitions. Update to v4.2 and re-run. Optionally enable **Tag probable ground**
+to flag uncertain slope boundary points as class 12 for manual review.
 
 ### "LAZ write failed"
-The `lazrs` backend isn't installed in the active Python env.
-```cmd
-D:\YourPath\arunpy\Scripts\pip.exe show lazrs
-```
-Verify the `Location:` line matches your venv. If not, reinstall in the venv:
 ```cmd
 D:\YourPath\arunpy\Scripts\pip.exe install lazrs
 ```
-Or just switch **Output Format** to "LAS (uncompressed)" in the GUI.
 
-### "WARNING: high candidate fraction — ground surface may be incorrect"
-Common on terrestrial scans. The 5% guard was tuned for airborne LiDAR. Either:
-- Raise `MAX_CANDIDATE_FRACTION` in `processing/bird_detector.py` to `0.30`
-- Or accept that bird detection skipped for that tile (ground classification still succeeded)
+### CSF stdout lines appear in console
+Expected — CSF's C++ layer writes directly to stdout. Harmless.
 
-### Build size > 1 GB
-Heavy dependency leaking through. Add it to `excludes` in `build.spec`. Common culprits: `torch`, `cupy`, `nvidia`, `tune_sklearn`, `ray`.
-
-### Processing taking 3+ hours, progress bar stuck
-- Check Task Manager: if RAM is ~maxed, you're swapping → reduce parallel workers
-- CSF iterations × cloth resolution is the slowness driver — switch to "speed mode" settings above
-
-### Parallel mode shows no per-tile logs until tile finishes
-Expected. Worker subprocess logs are buffered and only flush when the tile returns. Reduce CSF iterations or use Workers = 1 if you want live progress.
-
-### Pylance "value is not a known attribute of None"
-Static type checker false-positives — the code runs fine. Either:
-- Add `# type: ignore` comments
-- Or add `# pyright: reportOptionalMemberAccess=false` at top of file
+### Processing very slow
+- Switch to Speed mode settings (cloth 0.50 m, 300 iterations)
+- For SLAM scans: workers are forced to 1 — this is intentional
+- Streaming path (≥30M pts) is always sequential (single pass per file)
 
 ---
 
 ## Architecture Notes
 
-### Pipeline (per tile)
+### Per-tile pipeline (non-streaming)
 ```
-LAZ tile + buffer points from 8 neighbours
-       │
-       ▼
-Voxel-thin to 0.10–0.20 m (CSF needs sparser input)
-       │
-       ▼
-CSF cloth simulation → ground / non-ground indices
-       │
-       ▼
-Interpolate ground surface back to ALL original points → nZ per point
-       │
-       ▼
-Filter: 0.02 m < nZ < 0.40 m AND not ground = bird candidates
-       │
-       ▼
-Voxel downsample candidates if > 500K (memory protection)
-       │
-       ▼
-DBSCAN on XY → bird clusters
-       │
-       ▼
-Footprint filter (0.005 – 1.0 m² typical bird size)
-       │
-       ▼
-Write LAZ with class 2 (ground) + class 20 (bird) + class 1 (other)
+LAZ tile + 5 m buffer from 8 neighbours
+    │
+    ▼
+Voxel-thin → CSF cloth simulation → ground raster
+    │
+    ▼
+nZ per point (bilinear interpolation of ground raster)
+    │
+    ▼
+Height classification (ground / veg / probable-ground / noise)
+    │
+    ▼
+Bird detection: DBSCAN on 0.02–0.40 m nZ candidates
+    │
+    ▼
+Write classified LAZ + bird_contacts.csv
 ```
 
-### Parallelism model
-- `ProcessPoolExecutor` with N workers (configurable in GUI)
-- Each worker handles one tile end-to-end (CSF + DBSCAN)
-- Tiles ≥150 M points run **solo** (no parallel siblings — RAM protection)
-- Logs buffered per worker, flushed when tile completes
-- `multiprocessing.freeze_support()` call in `main.py` is REQUIRED for PyInstaller exe
+### Streaming pipeline (≥30M points)
+```
+Pass 1: stream in 5M-pt chunks → 2D voxel min-Z grid → CSF → z_grid raster
+Pass 2: stream again → bilinear nZ lookup → classify → write chunk
+Peak RAM: ~400 MB
+```
 
-### Edge handling
-Each tile loads a configurable buffer (default 5 m) from its 8 grid neighbours.
-Ground classification uses tile + buffer; bird detection uses core tile only.
-This prevents ground-surface discontinuities at tile boundaries.
-
-Tile filenames must follow `<easting>_<northing>.laz` convention
-(e.g. `498000_171500.laz`) so neighbours can be found by ±tile_size on each coord.
-
----
-
-## Known Limitations
-
-- **Dense low scrub** (<10 cm tall) merges into ground class — geometry alone can't separate
-  it from real ground. Would need intensity / return-count post-processing.
-- **Very dense tiles** (>500 M points in a 100×100 m tile) — tile smaller (25 m) first.
-- **CSF is slow** on huge dense data (1 hour+ for 100M+ point tile) — use speed-mode settings
-  or tile smaller.
-- **No GPU acceleration.** cuML DBSCAN would give 10–50× speedup but requires NVIDIA + CUDA + cuML install.
-- **CSF C++ stdout** (`[0] Configuring terrain...` lines) bypasses the log capture in parallel
-  mode — appears interleaved between workers.
-- **Tile name parser** assumes integer eastings/northings split by underscore.
-
----
-
-## Resuming Work / AI Handoff
-
-The file `CONTEXT.md` in this folder is a condensed brief specifically for handing
-the project to a new AI chat or developer. Paste its contents into a new conversation
-along with what you want to change, and they'll have full context without
-re-discovering it.
-
----
-
-## Version History
-
-- **v1.0** — Initial GUI + sequential tile processing (CSF + DBSCAN)
-- **v1.1** — Added Grid Minimum fallback, fixed morphological opening bug
-- **v1.2** — Added voxel thinning for CSF speedup, memory-safe DBSCAN
-- **v1.3** — Added single-file mode with auto-tiling, build pipeline
-- **v1.4** — Added LAS/LAZ output format choice, LAS version selection
-- **v1.5** — Added parallel processing with auto-throttle for giant tiles
-- **v1.6** — Added "Skip tiling" mode for small-to-medium files
-- **v1.7** — Drone-LiDAR fix: RGB and extra dimensions now preserved through tiling and write
-- **v1.8** — TerraScan-style height classification (low/med/high veg, low noise, model keypoints) + "Use existing classification 2" ground source
+### Folder layout
+```
+Starling classifier v4.1/
+├── main.py                  # GUI entry point
+├── convert_e57.py           # Standalone E57 → LAZ batch converter
+├── convert_e57.bat          # Batch launcher for E57 converter
+├── start_gui.bat            # Launch GUI
+├── build.bat                # PyInstaller build
+├── build.spec               # PyInstaller spec
+├── requirements.txt
+├── README.md
+├── gui/
+│   └── main_window.py       # PyQt6 window, WorkerThread, BatchWorkerThread, E57WorkerThread
+└── processing/
+    ├── tile_processor.py    # ProcessParams, process_single_file, _classify_streaming, process_all_tiles
+    ├── ground_classifier.py # classify_ground_csf, classify_ground_csf_streaming, nz_from_grid
+    ├── tiler.py             # tile_file, write_tile_boundaries_dxf
+    ├── height_classifier.py # classify_heights (veg + noise + probable-ground)
+    ├── bird_detector.py     # detect_bird_contacts, DBSCAN
+    ├── las_io.py            # read_laz, write_classified_laz, convert_e57_to_laz
+    └── photogrammetry_classifier.py  # vegetation index, building detection
+```
 
 ---
 
