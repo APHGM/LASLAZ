@@ -1,5 +1,11 @@
-# Data / output directories (multi-GB)
+# Point cloud data files (multi-GB — store on OneDrive/drive, not git)
+*.laz
+*.las
+*.e57
+*.7z
+*.zip
 Tile/
+Tile_JLP/
 CSF_Out/
 OUt/
 
