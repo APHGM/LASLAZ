@@ -337,14 +337,16 @@ def convert_e57_to_laz(
     Convert an E57 file to a single LAZ file the rest of the pipeline
     can process normally.
 
-    Recap exports one E57 per project that may contain multiple scans.
-    All scans are merged into one LAZ with XYZ + intensity (if present) +
-    RGB (if present).  pye57 already applies each scan's pose transform so
-    coordinates are in the project's global frame.
+    Streams in chunks of E57_CONVERT_CHUNK points so even a 4-billion-point
+    scan uses only ~400 MB RAM.  All scans are merged into one LAZ with
+    XYZ + intensity (if present) + RGB (if present).  pye57 applies each
+    scan's pose transform so coordinates are in the project's global frame.
 
     Returns the path to the written LAZ.
     """
     import pye57
+
+    E57_CONVERT_CHUNK = 5_000_000   # points per read — ~400 MB peak RAM
 
     filepath = Path(filepath)
     if out_path is None:
@@ -352,102 +354,136 @@ def convert_e57_to_laz(
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    log_fn(f"Converting E57 → LAZ: {filepath.name}")
+    log_fn(f"Converting E57 -> LAZ: {filepath.name}")
 
     e57 = pye57.E57(str(filepath))
     try:
         n_scans = e57.scan_count
         log_fn(f"  {n_scans} scan(s) found in E57")
 
-        all_x, all_y, all_z = [], [], []
-        all_int, all_r, all_g, all_b = [], [], [], []
-        has_intensity = False
-        has_rgb = False
+        # ── Pass 1: determine XYZ extents for header offsets ─────────────
+        # We sample the first chunk of each scan to get a bounding box;
+        # exact extents are not required — offsets just need to be "near" the data.
+        x_min = y_min = z_min = np.inf
+        scan_meta = []   # list of (pt_count, want_intensity, want_colors, has_rgb)
 
         for i in range(n_scans):
-            header = e57.get_header(i)
-            pt_count = header.point_count
-            available = set(header.point_fields)
-            log_fn(f"  Scan {i+1}/{n_scans}: {pt_count:,} pts  "
-                   f"fields={sorted(available)}")
-
+            hdr_e57 = e57.get_header(i)
+            pt_count = hdr_e57.point_count
+            available = set(hdr_e57.point_fields)
             want_intensity = "intensity" in available
             want_colors    = all(c in available for c in
                                  ("colorRed", "colorGreen", "colorBlue"))
+            log_fn(f"  Scan {i+1}/{n_scans}: {pt_count:,} pts  "
+                   f"fields={sorted(available)}")
 
-            data = e57.read_scan(
-                i,
-                intensity=want_intensity,
-                colors=want_colors,
-                ignore_missing_fields=True,
-                transform=True,         # apply scan pose → global coordinates
-            )
+            # Sample first chunk for extents
+            sample_n = min(E57_CONVERT_CHUNK, pt_count)
+            try:
+                sdata = e57.read_scan(i, intensity=False, colors=False,
+                                      ignore_missing_fields=True, transform=True,
+                                      row_range=(0, sample_n))
+            except TypeError:
+                sdata = e57.read_scan(i, intensity=False, colors=False,
+                                      ignore_missing_fields=True, transform=True)
+            sx = np.asarray(sdata["cartesianX"], dtype=np.float64)
+            sy = np.asarray(sdata["cartesianY"], dtype=np.float64)
+            sz = np.asarray(sdata["cartesianZ"], dtype=np.float64)
+            vld = np.isfinite(sx) & np.isfinite(sy) & np.isfinite(sz)
+            if vld.any():
+                x_min = min(x_min, float(sx[vld].min()))
+                y_min = min(y_min, float(sy[vld].min()))
+                z_min = min(z_min, float(sz[vld].min()))
+            scan_meta.append((pt_count, want_intensity, want_colors))
 
-            x = np.asarray(data["cartesianX"], dtype=np.float64)
-            y = np.asarray(data["cartesianY"], dtype=np.float64)
-            z = np.asarray(data["cartesianZ"], dtype=np.float64)
+        if np.isinf(x_min):
+            raise RuntimeError("E57 file contained no valid points")
 
-            # Guard against any residual NaN/inf (pye57 normally strips them
-            # via the invalid-state mask, but be defensive)
-            valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
-            n_bad = int((~valid).sum())
-            if n_bad:
-                log_fn(f"    Scan {i+1}: dropping {n_bad:,} invalid points")
-            x, y, z = x[valid], y[valid], z[valid]
-            n = len(x)
+        # ── Detect overall has_rgb / has_intensity from scan_meta ────────
+        has_rgb       = any(m[2] for m in scan_meta)
+        has_intensity = any(m[1] for m in scan_meta)
+        fmt_id = 7 if has_rgb else 6
 
-            all_x.append(x); all_y.append(y); all_z.append(z)
+        # ── Build laspy writer ───────────────────────────────────────────
+        laz_hdr = laspy.LasHeader(point_format=fmt_id, version="1.4")
+        laz_hdr.offsets = np.array([x_min, y_min, z_min])
+        laz_hdr.scales  = np.array([0.001, 0.001, 0.001])
 
-            if want_intensity and "intensity" in data:
-                has_intensity = True
-                iv = np.asarray(data["intensity"], dtype=np.float64)[valid]
-                # pye57 normalises intensity to 0–1 float
-                all_int.append((np.clip(iv, 0.0, 1.0) * 65535).astype(np.uint16))
-            else:
-                all_int.append(np.zeros(n, dtype=np.uint16))
+        log_fn(f"  Writing {out_path.name}  "
+               f"(LAS 1.4, fmt {fmt_id}, "
+               f"{'RGB+' if has_rgb else ''}{'intensity' if has_intensity else 'no-intensity'}) ...")
 
-            for ch, lst in [("colorRed",   all_r),
-                             ("colorGreen", all_g),
-                             ("colorBlue",  all_b)]:
-                if want_colors and ch in data:
-                    has_rgb = True
-                    cv = np.asarray(data[ch], dtype=np.float64)[valid]
-                    lst.append((np.clip(cv, 0.0, 1.0) * 65535).astype(np.uint16))
-                else:
-                    lst.append(np.zeros(n, dtype=np.uint16))
+        total_written = 0
+        with laspy.LasWriter(str(out_path), header=laz_hdr, do_compress=True) as writer:
+            for i, (pt_count, want_intensity, want_colors) in enumerate(scan_meta):
+                log_fn(f"  Converting scan {i+1}/{n_scans} "
+                       f"({pt_count:,} pts) ...")
+                n_chunks = max(1, (pt_count + E57_CONVERT_CHUNK - 1) // E57_CONVERT_CHUNK)
+
+                for chunk_idx in range(n_chunks):
+                    start = chunk_idx * E57_CONVERT_CHUNK
+                    end   = min(start + E57_CONVERT_CHUNK, pt_count)
+
+                    try:
+                        data = e57.read_scan(
+                            i,
+                            intensity=want_intensity,
+                            colors=want_colors,
+                            ignore_missing_fields=True,
+                            transform=True,
+                            row_range=(start, end),
+                        )
+                    except TypeError:
+                        # pye57 version doesn't support row_range — read full scan once
+                        if chunk_idx > 0:
+                            break   # already wrote this scan in chunk 0
+                        data = e57.read_scan(
+                            i,
+                            intensity=want_intensity,
+                            colors=want_colors,
+                            ignore_missing_fields=True,
+                            transform=True,
+                        )
+
+                    x = np.asarray(data["cartesianX"], dtype=np.float64)
+                    y = np.asarray(data["cartesianY"], dtype=np.float64)
+                    z = np.asarray(data["cartesianZ"], dtype=np.float64)
+
+                    valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+                    x, y, z = x[valid], y[valid], z[valid]
+                    n = len(x)
+                    if n == 0:
+                        continue
+
+                    pts = laspy.ScaleAwarePointRecord.zeros(n, header=laz_hdr)
+                    pts.x = x
+                    pts.y = y
+                    pts.z = z
+
+                    if want_intensity and "intensity" in data:
+                        iv = np.asarray(data["intensity"], dtype=np.float64)[valid]
+                        pts.intensity = (np.clip(iv, 0.0, 1.0) * 65535).astype(np.uint16)
+
+                    if want_colors and has_rgb:
+                        for ch, attr in [("colorRed", "red"),
+                                         ("colorGreen", "green"),
+                                         ("colorBlue", "blue")]:
+                            if ch in data:
+                                cv = np.asarray(data[ch], dtype=np.float64)[valid]
+                                setattr(pts, attr,
+                                        (np.clip(cv, 0.0, 1.0) * 65535).astype(np.uint16))
+
+                    writer.write_points(pts)
+                    total_written += n
+
+                    pct = int(100 * min(end, pt_count) / pt_count)
+                    log_fn(f"    Scan {i+1}: {pct}%  ({total_written:,} pts written)")
 
     finally:
         e57.close()
 
-    # ── Concatenate all scans ─────────────────────────────────────────────
-    X = np.concatenate(all_x)
-    Y = np.concatenate(all_y)
-    Z = np.concatenate(all_z)
-    total = len(X)
-    log_fn(f"  Total after merge: {total:,} points")
-
-    if total == 0:
+    if total_written == 0:
         raise RuntimeError("E57 file contained no valid points after conversion")
 
-    # ── Build laspy header ────────────────────────────────────────────────
-    # Format 6 = XYZ + intensity (no RGB)
-    # Format 7 = XYZ + intensity + RGB
-    fmt_id = 7 if has_rgb else 6
-    hdr = laspy.LasHeader(point_format=fmt_id, version="1.4")
-    hdr.offsets = np.array([X.min(), Y.min(), Z.min()])
-    hdr.scales  = np.array([0.001, 0.001, 0.001])   # 1 mm precision
-
-    las = laspy.LasData(header=hdr)
-    las.x = X; las.y = Y; las.z = Z
-
-    las.intensity = np.concatenate(all_int)
-    if has_rgb:
-        las.red   = np.concatenate(all_r)
-        las.green = np.concatenate(all_g)
-        las.blue  = np.concatenate(all_b)
-
-    log_fn(f"  Writing {out_path.name}  (LAS 1.4, point format {fmt_id}, "
-           f"{'RGB+' if has_rgb else ''}intensity) ...")
-    las.write(str(out_path))
-    log_fn(f"  E57 conversion complete → {out_path}")
+    log_fn(f"  Done: {total_written:,} points -> {out_path.name}")
     return out_path
