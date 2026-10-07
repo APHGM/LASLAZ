@@ -1,8 +1,0 @@
-PyQt6
-laspy[lazrs]
-numpy
-scipy
-scikit-learn
-cloth-simulation-filter
-ezdxf
-psutil

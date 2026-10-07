@@ -119,7 +119,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="StarlingClassifier_v3",
+    name="StarlingClassifier_v4.2",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
