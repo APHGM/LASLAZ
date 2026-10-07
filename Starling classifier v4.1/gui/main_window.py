@@ -181,7 +181,7 @@ class WorkerThread(QThread):
                 # E57 → LAZ conversion before any processing (subprocess-isolated)
                 if Path(source).suffix.lower() == ".e57":
                     import sys as _sys, subprocess as _sub
-                    laz_out = Path(self.out_dir) / (Path(source).stem + "_converted.laz")
+                    laz_out = Path(self.out_dir) / (Path(source).stem + ".laz")
                     self.log.emit(f"Converting E57 → LAZ: {Path(source).name}")
                     script = Path(__file__).parent.parent / "convert_e57.py"
                     args = [_sys.executable, str(script), source,
@@ -202,7 +202,7 @@ class WorkerThread(QThread):
                             self.finished.emit("")
                             return
                         source = str(laz_out)
-                        self.log.emit(f"E57 converted → {laz_out.name}")
+                        self.log.emit(f"E57 converted → {laz_out.name} — classifying...")
                     except Exception as e:
                         self.log.emit(f"ERROR launching E57 converter: {e}")
                         self.finished.emit("")
