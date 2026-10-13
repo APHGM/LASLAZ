@@ -1180,13 +1180,16 @@ def process_all_tiles(
         # Separate giants (run sequentially) from normals (parallel)
         giants, normals = [], []
         for job in jobs:
-            # Use laspy header to get exact point count (fast — only reads header)
+            # Use laspy header to get exact point count (fast — only reads header).
+            # If the header is unreadable (e.g. non-ASCII bytes before sanitisation),
+            # default to SOLO threshold so the tile runs sequentially — safer than
+            # sending an unknown-size tile into the parallel pool.
             try:
                 import laspy
                 with laspy.open(job["tile_path"]) as r:
                     pt_count = r.header.point_count
             except Exception:
-                pt_count = 0
+                pt_count = SOLO_TILE_POINT_THRESHOLD
             if pt_count >= SOLO_TILE_POINT_THRESHOLD:
                 giants.append(job)
             else:
@@ -1248,6 +1251,15 @@ def process_all_tiles(
                     break
                 try:
                     result = fut.result()
+                except MemoryError as e:
+                    # OOM in a parallel worker — the tile is too large to share RAM
+                    # with siblings. Move it to the giants list for sequential retry.
+                    job = futures[fut]
+                    tname = Path(job["tile_path"]).name
+                    log_fn(f"  ⚠ OOM on {tname} in parallel — will retry sequentially")
+                    giants.append(job)
+                    in_flight.pop(fut, None)
+                    continue
                 except Exception as e:
                     job = futures[fut]
                     log_fn(f"WORKER CRASHED on {Path(job['tile_path']).name}: {e}")
