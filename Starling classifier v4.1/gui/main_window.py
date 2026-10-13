@@ -129,6 +129,7 @@ class WorkerThread(QThread):
             log_fn=self.log.emit,
             progress_fn=self.progress.emit,
             cancelled_fn=lambda: self._cancel,
+            write_boundary_dxf=False,   # DXF written to out_dir by process_all_tiles
         )
         if self._cancel:
             return ""
@@ -417,6 +418,7 @@ class BatchWorkerThread(QThread):
                 log_fn=lambda msg: self.log.emit(prefix + msg),
                 progress_fn=lambda d, t: None,
                 cancelled_fn=lambda: self._cancel,
+                write_boundary_dxf=False,   # DXF written to out_dir by process_all_tiles
             )
             if self._cancel:
                 return False
