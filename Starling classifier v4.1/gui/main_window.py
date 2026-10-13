@@ -178,38 +178,57 @@ class WorkerThread(QThread):
             # ── Single file ───────────────────────────────────────────────
             if self.mode == "file":
                 source = self.source
-                # E57 → LAZ conversion before any processing (subprocess-isolated)
+                # E57 → LAZ conversion before any processing
                 if Path(source).suffix.lower() == ".e57":
-                    import sys as _sys, subprocess as _sub
+                    import subprocess as _sub, os as _os
+                    from processing.las_io import _find_e572las
                     laz_out = Path(self.out_dir) / (Path(source).stem + ".laz")
                     self.log.emit(f"Converting E57 → LAZ: {Path(source).name}")
-                    script = Path(__file__).parent.parent / "convert_e57.py"
-                    args = [_sys.executable, str(script), source,
-                            "--out", str(Path(self.out_dir))]
-                    try:
-                        import os as _os
-                        _env = {**_os.environ, "PYTHONIOENCODING": "utf-8"}
-                        proc = _sub.Popen(
-                            args, stdout=_sub.PIPE, stderr=_sub.STDOUT,
-                            text=True, encoding="utf-8", errors="replace",
-                            env=_env,
-                        )
-                        for line in proc.stdout:
-                            self.log.emit(line.rstrip())
-                        proc.wait()
-                        if proc.returncode != 0:
+                    e572las = _find_e572las()
+                    if e572las:
+                        # Call e572las.exe directly — avoids launching a new GUI
+                        # window that occurs when sys.executable is the built EXE.
+                        _flags = 0x08000000  # CREATE_NO_WINDOW
+                        try:
+                            proc = _sub.Popen(
+                                [e572las, source, "-o", str(laz_out)],
+                                stdout=_sub.PIPE, stderr=_sub.STDOUT,
+                                text=True, encoding="utf-8", errors="replace",
+                                creationflags=_flags,
+                            )
+                            for line in proc.stdout:
+                                self.log.emit(f"  {line.rstrip()}")
+                            proc.wait()
+                        except Exception as e:
+                            self.log.emit(f"ERROR launching e572las: {e}")
+                            self.finished.emit("")
+                            return
+                        if proc.returncode != 0 or not laz_out.exists():
                             self.log.emit(
-                                f"ERROR: E57 conversion failed (exit {proc.returncode})."
-                                " The file may be unsupported or corrupted."
+                                f"ERROR: e572las failed (exit {proc.returncode})."
+                                " Check that the E57 is not corrupted."
                             )
                             self.finished.emit("")
                             return
-                        source = str(laz_out)
-                        self.log.emit(f"E57 converted → {laz_out.name} — classifying...")
-                    except Exception as e:
-                        self.log.emit(f"ERROR launching E57 converter: {e}")
-                        self.finished.emit("")
-                        return
+                    else:
+                        # Fallback: pye57 in-process (only for small files)
+                        try:
+                            from processing.las_io import convert_e57_to_laz
+                            convert_e57_to_laz(
+                                source,
+                                out_path=str(laz_out),
+                                log_fn=self.log.emit,
+                            )
+                        except Exception as e:
+                            self.log.emit(f"ERROR converting E57: {e}")
+                            self.finished.emit("")
+                            return
+                        if not laz_out.exists():
+                            self.log.emit("ERROR: E57 conversion produced no output file.")
+                            self.finished.emit("")
+                            return
+                    source = str(laz_out)
+                    self.log.emit(f"E57 converted → {laz_out.name} — classifying...")
                 csv_path = self._process_single_or_tile(source)
                 self.finished.emit(str(csv_path) if csv_path else "")
                 return
@@ -255,11 +274,12 @@ class E57WorkerThread(QThread):
         self._cancel = True
 
     def run(self):
-        import sys, subprocess
+        import subprocess
         from pathlib import Path as _Path
+        from processing.las_io import _find_e572las, convert_e57_to_laz
 
-        script = _Path(__file__).parent.parent / "convert_e57.py"
-        python = sys.executable
+        e572las = _find_e572las()
+        _flags = 0x08000000  # CREATE_NO_WINDOW
         n_ok = n_fail = 0
 
         for i, f in enumerate(self._files):
@@ -276,32 +296,35 @@ class E57WorkerThread(QThread):
                     n_ok += 1
                     continue
 
-                args = [python, str(script), str(f)]
-                if self._out_dir:
-                    args += ["--out", str(self._out_dir)]
+                if e572las:
+                    proc = subprocess.Popen(
+                        [e572las, str(f), "-o", str(laz_path)],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, encoding="utf-8", errors="replace",
+                        creationflags=_flags,
+                    )
+                    while True:
+                        line = proc.stdout.readline()
+                        if not line:
+                            break
+                        self.log.emit(f"  {line.rstrip()}")
+                        if self._cancel:
+                            proc.terminate()
+                            proc.wait()
+                            break
+                    proc.wait()
+                    ok = proc.returncode == 0 and laz_path.exists()
+                else:
+                    # Fallback: pye57 in-process (suitable only for small files)
+                    convert_e57_to_laz(str(f), out_path=str(laz_path),
+                                       log_fn=self.log.emit)
+                    ok = laz_path.exists()
 
-                import os as _os2
-                proc = subprocess.Popen(
-                    args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace",
-                    env={**_os2.environ, "PYTHONIOENCODING": "utf-8"},
-                )
-                while True:
-                    line = proc.stdout.readline()
-                    if not line:
-                        break
-                    self.log.emit(line.rstrip())
-                    if self._cancel:
-                        proc.terminate()
-                        proc.wait()
-                        break
-                proc.wait()
-
-                if proc.returncode == 0:
+                if ok:
                     self.file_done.emit(i, True, "")
                     n_ok += 1
                 else:
-                    msg = f"Process exited with code {proc.returncode} (possible segfault or bad E57)"
+                    msg = "Conversion produced no output — file may be corrupted"
                     self.log.emit(f"  ERROR: {msg}")
                     self.file_done.emit(i, False, msg)
                     n_fail += 1
