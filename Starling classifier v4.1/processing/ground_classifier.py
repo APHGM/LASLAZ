@@ -211,6 +211,50 @@ def _fill_nan(grid: np.ndarray) -> np.ndarray:
     return filled
 
 
+# ── Giant-tile streaming subsample ───────────────────────────────────────────
+
+def stream_voxel_subsample(
+    tile_path,
+    voxel_size: float = 0.25,
+    chunk_size: int = 5_000_000,
+) -> np.ndarray:
+    """
+    Stream a LAZ/LAS file and return a voxel-thinned subsample (min-Z per cell).
+
+    Memory used is proportional to the 2-D grid, not the point count.
+    For a 100 m × 100 m tile at 0.25 m voxel: 400×400 = 160 K cells × 4 B = 640 KB.
+
+    Returns shape (N, 3) float64 array — one representative point per occupied cell.
+    """
+    import laspy
+    from pathlib import Path as _Path
+
+    tile_path = _Path(tile_path)
+    with laspy.open(str(tile_path)) as reader:
+        h = reader.header
+        xmin, ymin = float(h.mins[0]), float(h.mins[1])
+        xmax, ymax = float(h.maxs[0]), float(h.maxs[1])
+
+        ncols = int(np.ceil((xmax - xmin) / voxel_size)) + 1
+        nrows = int(np.ceil((ymax - ymin) / voxel_size)) + 1
+        z_grid = np.full((nrows, ncols), np.inf, dtype=np.float32)
+
+        for chunk in reader.chunk_iterator(chunk_size):
+            xs = np.asarray(chunk.x, dtype=np.float64)
+            ys = np.asarray(chunk.y, dtype=np.float64)
+            zs = np.asarray(chunk.z, dtype=np.float32)
+            ci = np.clip(((xs - xmin) / voxel_size).astype(np.int32), 0, ncols - 1)
+            ri = np.clip(((ys - ymin) / voxel_size).astype(np.int32), 0, nrows - 1)
+            np.minimum.at(z_grid, (ri, ci), zs)
+
+    valid = z_grid < np.inf
+    ri_v, ci_v = np.where(valid)
+    xs_sub = xmin + (ci_v + 0.5) * voxel_size
+    ys_sub = ymin + (ri_v + 0.5) * voxel_size
+    zs_sub = z_grid[ri_v, ci_v].astype(np.float64)
+    return np.column_stack([xs_sub, ys_sub, zs_sub])
+
+
 # ── Streaming path (large files / low RAM) ───────────────────────────────────
 
 def nz_from_grid(

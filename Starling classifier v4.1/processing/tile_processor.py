@@ -19,7 +19,7 @@ from .bird_detector import detect_bird_contacts, BirdCluster
 from .height_classifier import (
     classify_heights, classify_model_keypoints, ground_mask_from_classification,
 )
-from .ground_classifier import _compute_nz   # for nz from existing ground
+from .ground_classifier import _compute_nz, _fill_nan, _voxel_thin, stream_voxel_subsample
 from .photogrammetry_classifier import (
     vegetation_mask as _photo_vegetation_mask,
     detect_buildings as _photo_detect_buildings,
@@ -1049,6 +1049,243 @@ def _ckpt_save(out_dir: Path, data: dict) -> None:
         pass   # never crash on checkpoint write failure
 
 
+# ── Constants for streaming giant-tile path ──────────────────────────────────
+_GIANT_VOXEL  = 0.25        # subsample grid resolution (m) — 0.25 m captures wall base/ground detail
+_GIANT_CHUNK  = 5_000_000   # points per streaming chunk
+
+
+def _process_one_tile_streaming(job: dict, inline_log_fn=None) -> dict:
+    """
+    Memory-efficient variant of _process_one_tile for tiles too large to load.
+
+    Ground classification pipeline:
+      1. Stream tile → min-Z per 0.25 m voxel grid (memory ∝ grid, not pts)
+      2. CSF on that tiny subsample (~600 K pts for a 100 m × 100 m tile)
+      3. Build ground-surface lookup grid from CSF result
+      4. Stream tile again → classify per chunk using O(1) grid lookup
+
+    Vegetation (RGB) and height classification run per-chunk.
+    Building detection and model keypoints are skipped (DBSCAN needs full cloud).
+    """
+    import laspy
+    import CSF as _CSF
+
+    tile_path        = Path(job["tile_path"])
+    neighbour_paths  = [Path(p) for p in job["neighbour_paths"]]
+    params: ProcessParams = job["params"]
+    out_dir          = Path(job["out_dir"])
+
+    log_lines: list[str] = []
+    def log(msg: str):
+        log_lines.append(msg)
+        if inline_log_fn is not None:
+            inline_log_fn(msg)
+
+    result = {
+        "tile": tile_path.name, "status": "UNKNOWN", "reason": "",
+        "n_ground": 0, "n_bird": 0, "n_clusters": 0, "clusters": [],
+        "log_lines": log_lines, "written_path": None,
+    }
+
+    photo_mode = (params.point_cloud_source == "photogrammetry")
+    log(f"Processing {tile_path.name} [streaming — tile too large for full load] ...")
+
+    # ── Sanitize header (non-ASCII bytes crash laspy) ─────────────────────
+    from .las_io import _sanitize_las_header_strings
+    _sanitize_las_header_strings(tile_path)
+
+    # ── Step 1: stream min-Z voxel subsample ─────────────────────────────
+    log(f"  Pass 1/2 — building {_GIANT_VOXEL}m voxel subsample for CSF ...")
+    try:
+        xyz_sub = stream_voxel_subsample(tile_path, _GIANT_VOXEL, _GIANT_CHUNK)
+    except Exception as e:
+        log(f"  ERROR building subsample: {e}")
+        result["status"] = "SKIPPED"; result["reason"] = f"Subsample: {e}"; return result
+    log(f"  Subsample: {len(xyz_sub):,} pts  "
+        f"(from {_GIANT_VOXEL}m grid over tile extent)")
+
+    # ── Read tile extent from header ──────────────────────────────────────
+    try:
+        with laspy.open(str(tile_path)) as _r:
+            _h = _r.header
+            core_xmin, core_xmax = float(_h.mins[0]), float(_h.maxs[0])
+            core_ymin, core_ymax = float(_h.mins[1]), float(_h.maxs[1])
+            src_fmt_id  = _h.point_format.id
+            src_version = _h.version
+            src_scales  = _h.scales
+            src_offsets = _h.offsets
+            try:
+                src_vlrs = list(_h.vlrs)
+            except Exception:
+                src_vlrs = []
+    except Exception as e:
+        log(f"  ERROR reading header: {e}")
+        result["status"] = "SKIPPED"; result["reason"] = str(e); return result
+
+    # ── Step 2: add thinned neighbour buffer to improve CSF boundary ──────
+    xyz_buf = _load_neighbour_buffer(
+        neighbour_paths, params.buffer_m,
+        core_xmin, core_xmax, core_ymin, core_ymax,
+    )
+    if len(xyz_buf) > 0:
+        buf_thin_idx = _voxel_thin(xyz_buf, _GIANT_VOXEL)
+        xyz_csf = np.vstack([xyz_sub, xyz_buf[buf_thin_idx]])
+        log(f"  + {len(buf_thin_idx):,} thinned neighbour pts → CSF input: {len(xyz_csf):,} pts")
+    else:
+        xyz_csf = xyz_sub
+
+    # ── Step 3: run CSF on subsample ─────────────────────────────────────
+    if photo_mode:
+        cloth_res  = params.photo_csf_cloth_resolution
+        class_thr  = params.photo_csf_class_threshold
+        rigidness  = params.photo_csf_rigidness
+        iterations = params.photo_csf_iterations
+    else:
+        cloth_res  = params.csf_cloth_resolution
+        class_thr  = params.csf_class_threshold
+        rigidness  = params.csf_rigidness
+        iterations = params.csf_iterations
+
+    log(f"  CSF: cloth={cloth_res} thr={class_thr} rigid={rigidness} iter={iterations}")
+    try:
+        csf = _CSF.CSF()
+        csf.params.bSloopSmooth = params.csf_slope_smooth
+        csf.params.cloth_resolution = cloth_res
+        csf.params.class_threshold  = class_thr
+        csf.params.rigidness        = rigidness
+        csf.params.interations      = iterations
+        csf.params.time_step        = 0.65
+        csf.setPointCloud(xyz_csf)
+        grp, off_grp = _CSF.VecInt(), _CSF.VecInt()
+        csf.do_filtering(grp, off_grp, exportCloth=False)
+        ground_pts_sub = xyz_csf[np.array(grp, dtype=np.int64)]
+        log(f"  CSF ground pts in subsample: {len(ground_pts_sub):,}")
+    except Exception as e:
+        log(f"  ERROR in CSF: {e}")
+        result["status"] = "SKIPPED"; result["reason"] = f"CSF: {e}"; return result
+
+    if len(ground_pts_sub) < 3:
+        log("  ERROR: CSF found <3 ground pts — tile may be all building/vegetation.")
+        result["status"] = "SKIPPED"; result["reason"] = "No ground found by CSF"; return result
+
+    # ── Step 4: build ground lookup grid ─────────────────────────────────
+    cell = cloth_res
+    gx_min = min(core_xmin, float(ground_pts_sub[:, 0].min()))
+    gy_min = min(core_ymin, float(ground_pts_sub[:, 1].min()))
+    gcols = int(np.ceil((core_xmax - gx_min) / cell)) + 2
+    grows = int(np.ceil((core_ymax - gy_min) / cell)) + 2
+
+    gci = np.clip(((ground_pts_sub[:, 0] - gx_min) / cell).astype(np.int32), 0, gcols - 1)
+    gri = np.clip(((ground_pts_sub[:, 1] - gy_min) / cell).astype(np.int32), 0, grows - 1)
+    z_sum   = np.zeros((grows, gcols), dtype=np.float64)
+    z_count = np.zeros((grows, gcols), dtype=np.int32)
+    np.add.at(z_sum,   (gri, gci), ground_pts_sub[:, 2])
+    np.add.at(z_count, (gri, gci), 1)
+    z_grid = np.where(z_count > 0, z_sum / np.maximum(z_count, 1), np.nan)
+    if np.isnan(z_grid).any():
+        z_grid = _fill_nan(z_grid)
+    log(f"  Ground grid: {grows}×{gcols} cells at {cell}m resolution")
+
+    del xyz_sub, xyz_csf, xyz_buf, ground_pts_sub   # free before streaming pass
+
+    def _nz_chunk(xs, ys, zs):
+        ci = np.clip(((xs - gx_min) / cell).astype(np.int32), 0, gcols - 1)
+        ri = np.clip(((ys - gy_min) / cell).astype(np.int32), 0, grows - 1)
+        return zs - z_grid[ri, ci]
+
+    # ── Step 5: stream classify + write output ────────────────────────────
+    log(f"  Pass 2/2 — streaming classify ...")
+    fmt_norm = (params.output_format or "laz").strip().lower()
+    do_compress = "laz" in fmt_norm
+
+    ver_norm = (params.las_version or "1.4").strip().lower()
+    if ver_norm in ("match", "") or not ver_norm.startswith("1."):
+        ver_norm = f"{src_version.major}.{src_version.minor}"
+
+    new_header = laspy.LasHeader(point_format=src_fmt_id, version=ver_norm)
+    new_header.scales  = src_scales
+    new_header.offsets = src_offsets
+    try:
+        new_header.vlrs.extend(src_vlrs)
+    except Exception:
+        pass
+
+    ext = ".laz" if do_compress else ".las"
+    out_path = out_dir / f"{tile_path.stem}_classified{ext}"
+
+    n_ground = 0
+    _gnd_thr = class_thr
+
+    try:
+        with laspy.open(str(tile_path)) as reader, \
+             open(str(out_path), "wb") as _fout, \
+             laspy.LasWriter(_fout, header=new_header,
+                             do_compress=do_compress) as writer:
+
+            for chunk in reader.chunk_iterator(_GIANT_CHUNK):
+                xs  = np.asarray(chunk.x, dtype=np.float64)
+                ys  = np.asarray(chunk.y, dtype=np.float64)
+                zs  = np.asarray(chunk.z, dtype=np.float64)
+
+                nz_chunk    = _nz_chunk(xs, ys, zs)
+                ground_mask = np.abs(nz_chunk) <= _gnd_thr
+
+                cls = np.full(len(xs), 1, dtype=np.uint8)
+                cls[ground_mask] = 2
+                n_ground += int(ground_mask.sum())
+
+                # Photogrammetry: vegetation pre-mask from RGB per chunk
+                if photo_mode:
+                    try:
+                        bands: dict = {}
+                        for ch in ("red", "green", "blue", "nir"):
+                            if hasattr(chunk, ch):
+                                bands[ch] = np.asarray(
+                                    getattr(chunk, ch), dtype=np.float32)
+                        if bands:
+                            from .photogrammetry_classifier import vegetation_mask as _vm
+                            vmask, _ = _vm(
+                                bands,
+                                index_choice=params.vegetation_index,
+                                ndvi_threshold=params.ndvi_threshold,
+                                vari_threshold=params.vari_threshold,
+                                exg_threshold=params.exg_threshold,
+                            )
+                            if vmask is not None:
+                                cls[vmask & ~ground_mask] = 3
+                    except Exception:
+                        pass
+
+                # Height-based veg / noise / probable-ground classification
+                if params.classify_vegetation:
+                    cls = classify_heights(
+                        cls, nz_chunk,
+                        veg_low_min=params.veg_low_min,
+                        veg_low_max=params.veg_low_max,
+                        veg_med_max=params.veg_med_max,
+                        noise_below_ground=params.noise_below_ground,
+                        probable_ground_band=params.probable_ground_band,
+                        ground_class_thr=_gnd_thr,
+                        protect_classes=(2,),
+                    )
+
+                chunk.classification = cls
+                writer.write_points(chunk)
+
+    except Exception as e:
+        log(f"  ERROR in streaming classify/write: {type(e).__name__}: {e}")
+        result["status"] = "WRITE_FAILED"; result["reason"] = str(e); return result
+
+    log(f"  NOTE: building detection skipped (tile too large for DBSCAN — "
+        f"classify with smaller tile size for building separation)")
+    log(f"  WROTE: {out_path.name}  (ground={n_ground:,})")
+
+    result["status"]       = "PROCESSED"
+    result["n_ground"]     = n_ground
+    result["written_path"] = str(out_path)
+    return result
+
+
 def process_all_tiles(
     tile_dir: str | Path,
     out_dir: str | Path,
@@ -1256,7 +1493,7 @@ def process_all_tiles(
                     # with siblings. Move it to the giants list for sequential retry.
                     job = futures[fut]
                     tname = Path(job["tile_path"]).name
-                    log_fn(f"  ⚠ OOM on {tname} in parallel — will retry sequentially")
+                    log_fn(f"  ⚠ OOM on {tname} in parallel — will retry via streaming path")
                     giants.append(job)
                     in_flight.pop(fut, None)
                     continue
@@ -1288,12 +1525,14 @@ def process_all_tiles(
                 _mark_done(futures[fut]["tile_path"])
                 progress_fn(completed, total)
 
-        # Then giants, in-process (less overhead, full RAM available)
+        # Then giants — use streaming pipeline (subsample CSF + chunk classify)
+        # so very large tiles (multi-floor buildings, dense photogrammetry)
+        # never need the full point cloud in memory at once.
         for job in giants:
             if cancelled_fn():
                 break
-            log_fn(f"\n[solo] large tile {Path(job['tile_path']).name}")
-            result = _process_one_tile(job)
+            log_fn(f"\n[giant] {Path(job['tile_path']).name}")
+            result = _process_one_tile_streaming(job, inline_log_fn=log_fn)
             for line in result["log_lines"]:
                 log_fn(line)
             tile_results.append({
