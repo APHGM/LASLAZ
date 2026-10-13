@@ -427,13 +427,14 @@ def _process_one_tile(job: dict, inline_log_fn=None) -> dict:
             n_core = len(xyz_core)
             ground_mask = ground_mask_all[:n_core]
             nz = nz_all[:n_core]
+    except MemoryError:
+        # Let OOM propagate to the pool so the parent can catch it via fut.result()
+        # and retry the tile through the streaming path (_process_one_tile_streaming).
+        raise
     except Exception as e:
         err_kind = type(e).__name__
         err_msg = str(e) or "(no message — likely out of memory or native crash)"
         log(f"  ERROR in ground classification: {err_kind}: {err_msg}")
-        if "memory" in err_kind.lower() or "MemoryError" in err_kind:
-            log("  ↳ Out of RAM. Re-run with 'Skip tiling' UNCHECKED to tile first, "
-                "or tile manually and re-process as Tile folder.")
         result["status"] = "SKIPPED"
         result["reason"] = f"Ground classification error: {err_kind}: {err_msg}"
         return result
@@ -1088,6 +1089,7 @@ def _process_one_tile_streaming(job: dict, inline_log_fn=None) -> dict:
     }
 
     photo_mode = (params.point_cloud_source == "photogrammetry")
+    slam_mode  = (params.point_cloud_source == "slam")
     log(f"Processing {tile_path.name} [streaming — tile too large for full load] ...")
 
     # ── Sanitize header (non-ASCII bytes crash laspy) ─────────────────────
@@ -1095,9 +1097,27 @@ def _process_one_tile_streaming(job: dict, inline_log_fn=None) -> dict:
     _sanitize_las_header_strings(tile_path)
 
     # ── Step 1: stream min-Z voxel subsample ─────────────────────────────
-    log(f"  Pass 1/2 — building {_GIANT_VOXEL}m voxel subsample for CSF ...")
+    # For SLAM and photogrammetry: remove vertical-surface cells (z_range_max)
+    # and elevated flat surfaces like rooftops (max_height_above_floor).
+    # This prevents CSF from treating roof or wall points as ground.
+    if slam_mode:
+        _sub_z_range    = params.slam_z_range_max   # default 0.50 m
+        _sub_max_height = 0.0                        # floor filtering not needed for SLAM
+    elif photo_mode:
+        _sub_z_range    = 0.50    # reject wall cells where drone saw multiple heights
+        _sub_max_height = 10.0   # reject rooftops > 10 m above lowest scanned point
+    else:
+        _sub_z_range    = 0.0
+        _sub_max_height = 0.0
+
+    log(f"  Pass 1/2 — building {_GIANT_VOXEL}m voxel subsample for CSF "
+        f"(z_range_max={_sub_z_range}, max_height={_sub_max_height}) ...")
     try:
-        xyz_sub = stream_voxel_subsample(tile_path, _GIANT_VOXEL, _GIANT_CHUNK)
+        xyz_sub = stream_voxel_subsample(
+            tile_path, _GIANT_VOXEL, _GIANT_CHUNK,
+            z_range_max=_sub_z_range,
+            max_height_above_floor=_sub_max_height,
+        )
     except Exception as e:
         log(f"  ERROR building subsample: {e}")
         result["status"] = "SKIPPED"; result["reason"] = f"Subsample: {e}"; return result
@@ -1140,6 +1160,11 @@ def _process_one_tile_streaming(job: dict, inline_log_fn=None) -> dict:
         class_thr  = params.photo_csf_class_threshold
         rigidness  = params.photo_csf_rigidness
         iterations = params.photo_csf_iterations
+    elif slam_mode:
+        cloth_res  = params.slam_csf_cloth_resolution
+        class_thr  = params.slam_csf_class_threshold
+        rigidness  = params.slam_csf_rigidness
+        iterations = params.slam_csf_iterations
     else:
         cloth_res  = params.csf_cloth_resolution
         class_thr  = params.csf_class_threshold
@@ -1215,6 +1240,8 @@ def _process_one_tile_streaming(job: dict, inline_log_fn=None) -> dict:
 
     n_ground = 0
     _gnd_thr = class_thr
+    _cls_counts = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 7: 0, 12: 0}
+    _nz_stats   = {"min": np.inf, "max": -np.inf, "finite": 0}
 
     try:
         with laspy.open(str(tile_path)) as reader, \
@@ -1233,6 +1260,13 @@ def _process_one_tile_streaming(job: dict, inline_log_fn=None) -> dict:
                 cls = np.full(len(xs), 1, dtype=np.uint8)
                 cls[ground_mask] = 2
                 n_ground += int(ground_mask.sum())
+
+                # Track nz statistics for diagnostics
+                fin = np.isfinite(nz_chunk)
+                if fin.any():
+                    _nz_stats["min"] = min(_nz_stats["min"], float(nz_chunk[fin].min()))
+                    _nz_stats["max"] = max(_nz_stats["max"], float(nz_chunk[fin].max()))
+                    _nz_stats["finite"] += int(fin.sum())
 
                 # Photogrammetry: vegetation pre-mask from RGB per chunk
                 if photo_mode:
@@ -1269,6 +1303,9 @@ def _process_one_tile_streaming(job: dict, inline_log_fn=None) -> dict:
                         protect_classes=(2,),
                     )
 
+                for _c in (1, 2, 3, 4, 5, 7, 12):
+                    _cls_counts[_c] += int((cls == _c).sum())
+
                 chunk.classification = cls
                 writer.write_points(chunk)
 
@@ -1276,6 +1313,12 @@ def _process_one_tile_streaming(job: dict, inline_log_fn=None) -> dict:
         log(f"  ERROR in streaming classify/write: {type(e).__name__}: {e}")
         result["status"] = "WRITE_FAILED"; result["reason"] = str(e); return result
 
+    log(f"  nZ range: min={_nz_stats['min']:.3f}  max={_nz_stats['max']:.3f}  "
+        f"finite pts={_nz_stats['finite']:,}")
+    log(f"  Class counts: unclass={_cls_counts[1]:,}  ground={_cls_counts[2]:,}  "
+        f"low_veg={_cls_counts[3]:,}  med_veg={_cls_counts[4]:,}  "
+        f"high_veg={_cls_counts[5]:,}  noise={_cls_counts[7]:,}  "
+        f"prob_gnd={_cls_counts[12]:,}")
     log(f"  NOTE: building detection skipped (tile too large for DBSCAN — "
         f"classify with smaller tile size for building separation)")
     log(f"  WROTE: {out_path.name}  (ground={n_ground:,})")

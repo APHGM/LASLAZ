@@ -217,12 +217,25 @@ def stream_voxel_subsample(
     tile_path,
     voxel_size: float = 0.25,
     chunk_size: int = 5_000_000,
+    z_range_max: float = 0.0,
+    max_height_above_floor: float = 0.0,
 ) -> np.ndarray:
     """
     Stream a LAZ/LAS file and return a voxel-thinned subsample (min-Z per cell).
 
     Memory used is proportional to the 2-D grid, not the point count.
     For a 100 m × 100 m tile at 0.25 m voxel: 400×400 = 160 K cells × 4 B = 640 KB.
+
+    z_range_max > 0: reject cells whose (max_Z - min_Z) exceeds this value.
+        Walls, columns and vertical surfaces span metres of Z; ground spans centimetres.
+        Typical values: 0.50 m (SLAM), 0.50 m (photogrammetry exterior).
+        0.0 = disabled.
+
+    max_height_above_floor > 0: reject cells whose min_Z exceeds
+        (global_min_Z + max_height_above_floor).
+        This removes elevated flat surfaces (rooftops, raised floors above the
+        lowest scanned level) from the CSF input.
+        0.0 = disabled.
 
     Returns shape (N, 3) float64 array — one representative point per occupied cell.
     """
@@ -237,7 +250,8 @@ def stream_voxel_subsample(
 
         ncols = int(np.ceil((xmax - xmin) / voxel_size)) + 1
         nrows = int(np.ceil((ymax - ymin) / voxel_size)) + 1
-        z_grid = np.full((nrows, ncols), np.inf, dtype=np.float32)
+        z_grid     = np.full((nrows, ncols), np.inf,  dtype=np.float32)
+        z_max_grid = np.full((nrows, ncols), -np.inf, dtype=np.float32)
 
         for chunk in reader.chunk_iterator(chunk_size):
             xs = np.asarray(chunk.x, dtype=np.float64)
@@ -245,10 +259,27 @@ def stream_voxel_subsample(
             zs = np.asarray(chunk.z, dtype=np.float32)
             ci = np.clip(((xs - xmin) / voxel_size).astype(np.int32), 0, ncols - 1)
             ri = np.clip(((ys - ymin) / voxel_size).astype(np.int32), 0, nrows - 1)
-            np.minimum.at(z_grid, (ri, ci), zs)
+            np.minimum.at(z_grid,     (ri, ci), zs)
+            np.maximum.at(z_max_grid, (ri, ci), zs)
 
     valid = z_grid < np.inf
+
+    if z_range_max > 0.0:
+        # Reject vertical surfaces: cells where max_Z - min_Z exceeds threshold.
+        z_range = z_max_grid - z_grid
+        valid = valid & (z_range <= z_range_max)
+
+    if max_height_above_floor > 0.0 and valid.any():
+        # Reject elevated flat surfaces (rooftops): cells whose min_Z is
+        # more than max_height_above_floor above the lowest valid cell.
+        z_floor = float(z_grid[valid].min())
+        valid = valid & (z_grid <= z_floor + max_height_above_floor)
+
     ri_v, ci_v = np.where(valid)
+    if len(ri_v) == 0:
+        # Filters too aggressive — fall back to unfiltered min-Z subsample
+        ri_v, ci_v = np.where(z_grid < np.inf)
+
     xs_sub = xmin + (ci_v + 0.5) * voxel_size
     ys_sub = ymin + (ri_v + 0.5) * voxel_size
     zs_sub = z_grid[ri_v, ci_v].astype(np.float64)
