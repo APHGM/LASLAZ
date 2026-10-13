@@ -358,6 +358,27 @@ def _find_e572las() -> str | None:
     return None
 
 
+def _sanitize_las_header_strings(laz_path: Path) -> None:
+    """Replace non-ASCII bytes in the LAS header's string fields.
+
+    LAS spec places system_identifier (32 bytes) at offset 18 and
+    generating_software (32 bytes) at offset 50. These are uncompressed
+    even in LAZ files. Faro/Leica software often writes UTF-8 in these
+    fields; laspy decodes them as ASCII and raises UnicodeDecodeError.
+    """
+    try:
+        with open(str(laz_path), "r+b") as f:
+            for offset in (18, 50):
+                f.seek(offset)
+                field = bytearray(f.read(32))
+                if any(b > 127 for b in field):
+                    sanitized = bytes(b if b <= 127 else 0x20 for b in field)
+                    f.seek(offset)
+                    f.write(sanitized)
+    except Exception:
+        pass
+
+
 def convert_e57_to_laz(
     filepath: str | Path,
     out_path: str | Path | None = None,
@@ -404,6 +425,7 @@ def convert_e57_to_laz(
             log_fn(f"  WARNING: e572las.exe failed (exit {proc.returncode}), "
                    f"falling back to pye57 ...")
         elif out_path.exists():
+            _sanitize_las_header_strings(out_path)
             log_fn(f"  Done -> {out_path.name}")
             return out_path
 
@@ -568,5 +590,6 @@ def convert_e57_to_laz(
     if total_written == 0:
         raise RuntimeError("E57 file contained no valid points after conversion")
 
+    _sanitize_las_header_strings(out_path)
     log_fn(f"  Done: {total_written:,} points -> {out_path.name}")
     return out_path

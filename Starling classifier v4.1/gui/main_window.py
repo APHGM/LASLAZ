@@ -211,6 +211,8 @@ class WorkerThread(QThread):
                             )
                             self.finished.emit("")
                             return
+                        from processing.las_io import _sanitize_las_header_strings
+                        _sanitize_las_header_strings(laz_out)
                     else:
                         # Fallback: pye57 in-process (only for small files)
                         try:
@@ -315,6 +317,9 @@ class E57WorkerThread(QThread):
                             break
                     proc.wait()
                     ok = proc.returncode == 0 and laz_path.exists()
+                    if ok:
+                        from processing.las_io import _sanitize_las_header_strings
+                        _sanitize_las_header_strings(laz_path)
                 else:
                     # Fallback: pye57 in-process (suitable only for small files)
                     convert_e57_to_laz(str(f), out_path=str(laz_path),
