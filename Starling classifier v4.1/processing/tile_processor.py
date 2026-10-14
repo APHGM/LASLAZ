@@ -327,6 +327,7 @@ def _process_one_tile(job: dict, inline_log_fn=None) -> dict:
     veg_mask_core = np.zeros(len(xyz_core), dtype=bool)
     building_mask_core = np.zeros(len(xyz_core), dtype=bool)
     photo_mode = (params.point_cloud_source == "photogrammetry")
+    slam_mode  = (params.point_cloud_source == "slam")
 
     if photo_mode:
         try:
